@@ -1,0 +1,4 @@
+# Ignore the virtual environment, data, and outputs
+venv/
+data/
+outputs/
