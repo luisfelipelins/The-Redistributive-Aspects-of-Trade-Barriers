@@ -9,7 +9,7 @@ import time
 import warnings
 import numpy as np
 import pandas as pd
-from scipy.optimize import brentq
+from scipy.optimize import brentq,bisect
 
 def calculate_stationary_distribution_eigenvector(trans_matrix):
     '''
@@ -198,8 +198,183 @@ def rouwenhorst_trans_matrix(ModelPar,CalibPar):
         Pi_1[1:s, :] /= 2
         
         Pi_0 = Pi_1.copy()
-        
+    
+    if CalibPar.rh_N==1:
+        y_grid = np.array([0])
+        Pi_0   = np.array([1])
+    
     return y_grid,Pi_0
+
+def solve_representative_household(I_0,ModelPar):
+    '''
+    For a given I_0, it solves the representative household problem.
+    
+    Part of the solver of the representative household problem. Functions run in
+    the following order:
+        
+    solve_representative_household -> representative_household_residual -> representative_household_wrapper
+
+    Parameters
+    ----------
+    I_0 : float
+        Guess for I.
+    ModelPar : TypeModelParameters
+        Model parameters.
+
+    Returns
+    -------
+    dict
+        Dictionary containing the solution to the representative household problem.
+
+    '''
+    
+    # Find r from the Euler Equation
+    r = (1-ModelPar.δ)/(ModelPar.δ)
+    
+    # Find w from the marginal task (MT)
+    w_0: float = ModelPar.w_star * ModelPar.β * t(I_0, ModelPar)
+    
+    # Find s from good X's ZPC
+    omega0 : float = Omega(I_0, ModelPar)
+    theta_x: float = 1 - ModelPar.α_x - ModelPar.γ
+    theta_y: float = 1 - ModelPar.α_y - ModelPar.γ
+    
+    log_s_0: float = (np.log(1)
+                      - (theta_x) * np.log((w_0 * omega0) / (theta_x))
+                      - ModelPar.γ * np.log(r / ModelPar.γ)) / ModelPar.α_x + np.log(ModelPar.α_x)
+    s_0    : float = np.exp(log_s_0)
+    
+    # Find p from good Y's ZPC
+    t1 = ((w_0*omega0)/(theta_y)     )**(theta_y)
+    t2 = ((s_0)       /(ModelPar.α_y))**(ModelPar.α_y)
+    t3 = ((r)         /(ModelPar.γ)  )**(ModelPar.γ)
+    
+    p_0 : float = t1 * t2 * t3
+    
+    # Find X and Y from L and H LMC - system Ax=b
+    A      : np.ndarray = np.array([[theta_x / (w_0 * omega0), (p_0 * theta_y) / (w_0 * omega0)],
+                                    [ModelPar.α_x / s_0,        (p_0 * ModelPar.α_y) / s_0]])
+    A_minus: np.ndarray = np.linalg.inv(A)
+    b      : np.ndarray = calculate_stationary_distribution_eigenvector(create_LH_skill_mat(ModelPar))
+    b_rhs  : np.ndarray = np.array([b[0] / (1 - I_0), b[1]])
+    
+    X_0, Y_0 = tuple(np.dot(A_minus, b_rhs))
+    
+    # Use K market clearing to find K^d
+    K_d: float = (ModelPar.γ*X_0+p_0*ModelPar.γ*Y_0)/r
+    
+    # Use representative HH budget constraint in SS to find K^s
+    K_s: float = (X_0/ModelPar.η - w_0*b[0] - s_0*b[1]) / r
+    
+    return {'w'  :w_0,
+            's'  :s_0,
+            'p'  :p_0,
+            'r'  :r  , 
+            'X'  :X_0,
+            'Y'  :Y_0,
+            'I'  :I_0,
+            'K_d':K_d,
+            'K_s':K_s}
+
+def representative_household_residual(I_0,ModelPar):
+    '''
+    Given a guess for I, it calculates the difference between capital supply in both goods demand.
+    
+    Used to adjust the guess for I based on this residual. Part of the solution
+    of the full representative household problem:
+
+    solve_representative_household -> representative_household_residual -> representative_household_wrapper
+
+    Parameters
+    ----------
+    I_0 : float
+        Guess for I.
+    ModelPar : TypeModelParameters
+        Model parameters.
+
+    Returns
+    -------
+    float
+        Difference between capital supply and demand.
+
+    '''
+    
+    sol = solve_representative_household(I_0=I_0, ModelPar=ModelPar)
+    
+    return sol['K_d'] - sol['K_s']
+
+def representative_household_wrapper(ModelPar):
+    '''
+    Wrapper to solve the analytical problem of the representative household. 
+    Runs in the following order:
+
+    solve_representative_household -> representative_household_residual -> representative_household_wrapper        
+
+    Parameters
+    ----------
+    ModelPar : TypeModelParameters
+        Model parameters.
+
+    Returns
+    -------
+    equilibrium : dict
+        Dictionary containing the solution to the representative household problem.
+
+    '''
+    
+    root       : float      = bisect(f=representative_household_residual, a=1e-9, b=1-1e-9,args=(ModelPar))
+    equilibrium: dict       = solve_representative_household(I_0=root,ModelPar=ModelPar)
+    b          : np.ndarray = calculate_stationary_distribution_eigenvector(create_LH_skill_mat(ModelPar))
+    a_L        : float      = equilibrium['K_s'] * equilibrium['w'] / (b[0]*equilibrium['w'] + b[1]*equilibrium['s'])
+    a_H        : float      = equilibrium['K_s'] * equilibrium['s'] / (b[0]*equilibrium['w'] + b[1]*equilibrium['s'])
+    
+    # Calculating lifelong utilities
+    psi_p: float = psi(p=equilibrium['p'],ModelPar=ModelPar)
+    C_L  : float = equilibrium['r']*a_L+equilibrium['w']
+    C_H  : float = equilibrium['r']*a_H+equilibrium['s']
+    D_L  : float = psi_p * C_L
+    D_H  : float = psi_p * C_H
+    
+    U_L  : float = (D_L**(1-ModelPar.σ))/((1-ModelPar.σ)*(1-ModelPar.δ))
+    U_H  : float = (D_H**(1-ModelPar.σ))/((1-ModelPar.σ)*(1-ModelPar.δ))
+    
+    equilibrium['C_L'] = C_L
+    equilibrium['C_H'] = C_H
+    equilibrium['U_L'] = U_L
+    equilibrium['U_H'] = U_H
+    
+    # Calculating income Gini
+    type_flag    : int        = np.argmin([C_L, C_H])
+    b            : np.ndarray = calculate_stationary_distribution_eigenvector(create_LH_skill_mat(ModelPar))
+    b_poor       : float      = b[type_flag]
+    L_inc_share  : float      = b_poor * min(C_L, C_H) / (b[0]*C_L + b[1]*C_H)
+    full_triangle: float      = 0.5
+    
+    small_triangle: float = (b_poor * L_inc_share) / 2
+    upper_triangle: float = ((1 - b_poor) * (1 - L_inc_share)) / 2
+    rectangle     : float = (1 - b_poor) * L_inc_share
+    B             : float = small_triangle + upper_triangle + rectangle
+    
+    gini: float = 1 - (B / full_triangle)
+    
+    equilibrium['income_gini'] = gini
+    
+    return equilibrium
+
+def Theta(I,ModelPar):
+    
+    return ModelPar.θ*(1-I)
+
+def hat_algebra_sysmem(I,ModelPar):
+    
+    Θ = Theta(I,ModelPar)
+    
+    numerator = ModelPar.α_x - (1-ModelPar.α_x-ModelPar.γ)*Θ
+    denominator = ModelPar.α_x*(Θ**2+Θ+I)+(1-ModelPar.α_x-ModelPar.γ)*Θ*(Θ+1-I)
+    
+    prod = I * (numerator/denominator)
+    
+    return prod
 
 def solve_wages_given_I(I_0,r,ModelPar):
     '''
@@ -232,7 +407,7 @@ def solve_wages_given_I(I_0,r,ModelPar):
     # Find w from the marginal task (MT)
     w_0: float = ModelPar.w_star * ModelPar.β * t(I_0, ModelPar)
     
-    # Find s from good Y's ZPC
+    # Find s from good X's ZPC
     omega0 : float = Omega(I_0, ModelPar)
     log_s_0: float = (np.log(1)
                       - (1 - ModelPar.α_x - ModelPar.γ) * np.log((w_0 * omega0) / (1 - ModelPar.α_x - ModelPar.γ))

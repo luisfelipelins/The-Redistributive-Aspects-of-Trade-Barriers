@@ -110,6 +110,12 @@ class GeneralEquilibriumModel:
                                                               ModelPar    = self.ModelPar)
         self.mod_res = mod_res
         
+    def solve_representative_household(self):
+        
+        rep_hh_res = functions.representative_household_wrapper(ModelPar = self.ModelPar)
+        
+        self.rep_hh_res = rep_hh_res
+        
     def inner_solution_wrapper(self,p,r):
         
         print("")
@@ -244,7 +250,7 @@ class GeneralEquilibriumModel:
         if type(self.mod_res) == type(None):
             raise ValueError('Model results are non-existent. Please solve the model once to run the economy statistics.')
         
-        mod_res: pd.DataFrame = self.mod_res
+        mod_res: pd.DataFrame = self.mod_res.copy()
         
         # Income, income decomposition & savings rate
         mod_res['y']        = (mod_res['a_0']*self.r) + (mod_res['z'] * (np.where(mod_res['skill_type'] == 'L', self.w, self.s)))
@@ -268,11 +274,11 @@ class GeneralEquilibriumModel:
         
         # Income Share GDP
         L       : pd.DataFrame = mod_res.loc[mod_res['skill_type']=='L']
-        mean_V_L: float        = (L['V'] * L['dens']).sum()
+        mean_V_L: float        = (L['V'] * L['dens']).sum()/L['dens'].sum()
         L       : float        = (L['z']*L['dens']).sum()
         
         H       : pd.DataFrame = mod_res.loc[mod_res['skill_type']=='H']
-        mean_V_H: float        = (H['V'] * H['dens']).sum()
+        mean_V_H: float        = (H['V'] * H['dens']).sum()/H['dens'].sum()
         H       : float        = (H['z']*H['dens']).sum()
         
         ls_share: float = (self.w*L)
