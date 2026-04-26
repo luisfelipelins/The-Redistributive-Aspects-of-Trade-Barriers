@@ -16,42 +16,42 @@ if __name__ == '__main__':
                                     sup_side_eq_eps  = 1e-5 ,
                                     vfi_lb           = 0    ,
                                     vfi_ubmul        = 15    ,
-                                    vfi_N            = 250  ,
+                                    vfi_N            = 1500  ,
                                     vfi_eps          = 1e-5 ,
                                     vfi_howard_steps = 20   ,
                                     gmc_eps          = 1e-3 ,
                                     kmc_eps          = 1e-3 ,
                                     p_init_guess     = 1,
-                                    r_init_guess     = 0.01,
-                                    inner_loop_eps   = 1e-3,
+                                    r_init_guess     = 0.03,
+                                    inner_loop_eps   = 1e-7,
                                     inner_loop_p_lb  = 0.1,
                                     inner_loop_p_ub  = 1.2,
                                     inner_loop_marg  = 0.3,
-                                    outer_loop_eps   = 1e-3,
+                                    outer_loop_eps   = 1e-7,
                                     outer_loop_r_lb  = 0.001)
-    
-    results = {}
-    
-    for b in [1,1.5,2,2.5,3,3.5,4,4.5,5,5.5,6,6.5,7]:
-        ModelPar = TypeModelParameters(α_x    = 0.400,
-                                       α_y    = 0.250,
-                                       γ      = 0.200,
-                                       β      = b,
-                                       w_star = 1.000,
-                                       θ      = 0.500,
-                                       η      = 0.500,
-                                       σ      = 2.000,
-                                       δ      = 0.960,
-                                       ρ      = 0.900,
-                                       σ_ϵ    = 0.150,
-                                       π_LL   = 0.700,
-                                       π_HH   = 0.800,
-                                       M      = 1.000)
-        mod = GeneralEquilibriumModel(ModelPar = ModelPar,
+
+    ModelPar = TypeModelParameters(α_x    = 0.600,
+                                    α_y    = 0.450,
+                                γ      = 0.200,
+                               β      = 2    ,
+                               w_star = 0.650,
+                               θ      = 0.500,
+                               η      = 0.700,
+                               σ      = 2.000,
+                               δ      = 0.960,
+                               ρ      = 0.900,
+                               σ_ϵ    = 0.150,
+                               π_LL   = 0.7 ,
+                               π_HH   = 0.8 ,
+                               M      = 1.000)
+    self = GeneralEquilibriumModel(ModelPar = ModelPar,
                                       CalibPar = CalibPar)
     
+    self.outer_loop_solver()
+    
         try:
-            mod.outer_loop_solver()
+            self.outer_loop_solver()
+
             results[b] = mod
         except Exception:
             pass
