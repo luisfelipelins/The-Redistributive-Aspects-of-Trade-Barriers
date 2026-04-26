@@ -5,11 +5,14 @@ Created on Mon Mar  9 12:09:02 2026
 @author: lfval
 """
 
+import os
 import time
 import numpy as np
 import pandas as pd
+import config
 import functions
 from dataclasses import dataclass
+from datetime import datetime
 from scipy.optimize import minimize_scalar
 
 @dataclass
@@ -58,13 +61,73 @@ class GeneralEquilibriumModel:
         self.ModelPar = ModelPar
         self.CalibPar = CalibPar
         
-        self.w        = None
-        self.s        = None
-        self.I        = None
-        self.r        = None
-        self.p        = None
-        self.mod_res  = None
+        self.w             = None
+        self.s             = None
+        self.I             = None
+        self.r             = None
+        self.p             = None
+        self.mod_res       = None
+        self._vfi_V_cache  = None
+
+        # Logging state (populated by _init_logging at the start of outer_loop_solver)
+        self._log_dir            = None
+        self._summary_log_path   = None
+        self._current_inner_log  = None
+        self._outer_eval_count   = 0
+        self._inner_eval_count   = 0
+        self._last_vfi_iters     = None
         
+    # ------------------------------------------------------------------
+    # Logging helpers (many thanks to Claude Code for the help here)
+    # ------------------------------------------------------------------
+
+    def _init_logging(self):
+        timestamp     = datetime.now().strftime('%Y%m%d_%H%M%S')
+        self._log_dir = config.LOG / f'run_{timestamp}'
+        self._log_dir.mkdir(exist_ok=True)
+        self._summary_log_path = os.path.join(self._log_dir, 'run_summary.log')
+        self._outer_eval_count = 0
+
+        SEP = '-' * 87
+        with open(self._summary_log_path, 'w') as f:
+            f.write(f"Run: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"{SEP}\n")
+            f.write(f"{'trial':>7}  {'r':>10}  {'p_conv':>10}  {'inner_resid':>12}  {'K_resid':>12}  {'inner_iters':>12}  {'time(s)':>9}\n")
+
+    def _log_inner_trial(self, r, p, residual, elapsed):
+        if self._current_inner_log is None:
+            return
+        with open(self._current_inner_log, 'a') as f:
+            f.write(
+                f"{self._inner_eval_count:>7}  {p:>10.6f}  {residual:>+12.4e}"
+                f"  {self._last_vfi_iters:>10}  {elapsed:>9.2f}"
+                f"  {self.w:>10.4f}  {self.s:>10.4f}  {self.I:>8.4f}\n"
+            )
+
+    def _log_outer_eval(self, r, outer_residual, inner_elapsed):
+        SEP = '-' * 87
+
+        # Complete inner log with convergence summary
+        conv_str = "successful" if self.inner_res.fun < self.CalibPar.inner_loop_eps else "unsuccessful"
+        with open(self._current_inner_log, 'a') as f:
+            f.write(f"{SEP}\n")
+            f.write(
+                f"Inner loop {conv_str} for p={self.p:.6f} in {inner_elapsed:.2f}s."
+                f"  Outer loop residual: {outer_residual:+.4e}.\n"
+            )
+
+        # Append row to summary log
+        with open(self._summary_log_path, 'a') as f:
+            f.write(
+                f"{self._outer_eval_count:>7}  {r:>10.6f}  {self.p:>10.6f}"
+                f"  {self.inner_res.fun:>12.4e}  {outer_residual:>+12.4e}"
+                f"  {self._inner_eval_count:>12}  {inner_elapsed:>9.2f}\n"
+            )
+
+    # ------------------------------------------------------------------
+    # Model solution methods
+    # ------------------------------------------------------------------
+
     def solve_firm_side(self,p,r):
         
         sol: dict = functions.solve_firm_side(p        = p,
@@ -86,17 +149,20 @@ class GeneralEquilibriumModel:
         state_grid : list       = [(f, z) for f in ['L', 'H'] for z in z_grid]
         stat_dist  : np.ndarray = functions.calculate_stationary_distribution(joint_trans)
 
-        pol_func, pol_idx, a_grid, utility = functions.model_vfi(w           = self.w,
-                                                                 s           = self.s,
-                                                                 r           = r,
-                                                                 p           = p,
-                                                                 income_func = functions.income_func,
-                                                                 state_grid  = state_grid,
-                                                                 joint_trans = joint_trans,
-                                                                 CalibPar    = self.CalibPar,
-                                                                 ModelPar    = self.ModelPar)
+        pol_func, pol_idx, a_grid, utility, V_arr, vfi_iters = functions.model_vfi(w          = self.w,
+                                                                                   s           = self.s,
+                                                                                   r           = r,
+                                                                                   p           = p,
+                                                                                   income_func = functions.income_func,
+                                                                                   state_grid  = state_grid,
+                                                                                   joint_trans = joint_trans,
+                                                                                   CalibPar    = self.CalibPar,
+                                                                                   ModelPar    = self.ModelPar,
+                                                                                   V_init      = self._vfi_V_cache)
+        self._vfi_V_cache    = V_arr
+        self._last_vfi_iters = vfi_iters
 
-        stat_dist: pd.DataFrame = functions.endog_stationary_distribution(pol_func    = pol_func,
+        stat_dist: pd.DataFrame = functions.calculate_stationary_distribution_endog(pol_func    = pol_func,
                                                                           pol_idx     = pol_idx,
                                                                           state_grid  = state_grid,
                                                                           a_grid      = a_grid,
@@ -111,19 +177,21 @@ class GeneralEquilibriumModel:
         self.mod_res = mod_res
         
     def solve_representative_household(self):
-        
+
         rep_hh_res = functions.representative_household_wrapper(ModelPar = self.ModelPar)
-        
+
         self.rep_hh_res = rep_hh_res
-        
-    def inner_solution_wrapper(self,p,r):
-        
+
+    def inner_solution_wrapper(self, p, r):
+        trial_start = time.time()
+        self._inner_eval_count += 1
+
         print("")
-        print(f"Trying p={p:.4f}.")
-        
-        self.solve_firm_side(p=p,r=r)
-        self.solve_household_side(p=p,r=r)
-        
+        print(f"For r={r:.4f}, trying p={p:.4f}.")
+
+        self.solve_firm_side(p=p, r=r)
+        self.solve_household_side(p=p, r=r)
+
         residual = functions.inner_loop_residual(p        = p,
                                                  w        = self.w,
                                                  s        = self.s,
@@ -131,66 +199,95 @@ class GeneralEquilibriumModel:
                                                  mod_res  = self.mod_res,
                                                  ModelPar = self.ModelPar,
                                                  CalibPar = self.CalibPar)
-        
+
+        self._log_inner_trial(r=r, p=p, residual=residual, elapsed=time.time()-trial_start)
+
         return abs(residual)
-    
-    def outer_solution_wrapper(self,r):
-        
+
+    def outer_solution_wrapper(self, r):
+        self._outer_eval_count += 1
+        self._inner_eval_count  = 0
+
+        # Open inner log for this r evaluation
+        inner_log_name          = f'inner_r{self._outer_eval_count:03d}_r{r:.6f}.log'
+        self._current_inner_log = os.path.join(self._log_dir, inner_log_name)
+        SEP = '-' * 87
+        with open(self._current_inner_log, 'w') as f:
+            f.write(f"Run: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  |  r = {r:.6f}\n")
+            f.write(f"{SEP}\n")
+            f.write(f"{'trial':>7}  {'p':>10}  {'L_resid':>12}  {'VFI_iters':>10}  {'time(s)':>9}  {'w':>10}  {'s':>10}  {'I':>8}\n")
+
         print("")
         print(f"Trying r={r:.4f}.")
-        
+
+        inner_start = time.time()
         self.inner_loop_solver(r=r)
-        
-        residual = functions.outer_loop_residual(p        = self.p, 
-                                                 r        = r, 
-                                                 mod_res  = self.mod_res, 
-                                                 ModelPar = self.ModelPar, 
+        inner_elapsed = time.time() - inner_start
+
+        residual = functions.outer_loop_residual(p        = self.p,
+                                                 r        = r,
+                                                 mod_res  = self.mod_res,
+                                                 ModelPar = self.ModelPar,
                                                  CalibPar = self.CalibPar)
+
+        self._log_outer_eval(r=r, outer_residual=residual, inner_elapsed=inner_elapsed)
+
         return abs(residual)
-        
+
     def inner_loop_solver(self, r):
-    
+
         obj_func = lambda p: self.inner_solution_wrapper(p, r=r)
-        
+
         if hasattr(self, 'p') and self.p is not None:
             lb = max(self.CalibPar.inner_loop_p_lb, self.p - self.CalibPar.inner_loop_marg)
             ub = min(self.CalibPar.inner_loop_p_ub, self.p + self.CalibPar.inner_loop_marg)
         else:
             lb = self.CalibPar.inner_loop_p_lb
             ub = self.CalibPar.inner_loop_p_ub
-        
-        res = minimize_scalar(obj_func, 
-                              bounds =(lb, ub), 
+
+        res = minimize_scalar(obj_func,
+                              bounds =(lb, ub),
                               method ='bounded',
                               tol    = self.CalibPar.inner_loop_eps)
-        
+
         self.p        : float = res.x
         self.inner_res = res
-        
+
         if res.fun<self.CalibPar.inner_loop_eps: print(f"Inner loop successfull for p={self.p:.4f}.")
         else                                   : print(f"Inner loop unsuccessfull for r={r:.4f}. ")
-        
+
     def outer_loop_solver(self):
-        
-        start = time.time()
-        
+
+        self._init_logging()
+        run_start = time.time()
+
         obj_func = lambda r: self.outer_solution_wrapper(r)
         r_ub = 1/self.ModelPar.δ-1
-        
-        res = minimize_scalar(obj_func, 
-                              bounds =(self.CalibPar.outer_loop_r_lb, r_ub), 
+
+        res = minimize_scalar(obj_func,
+                              bounds =(self.CalibPar.outer_loop_r_lb, r_ub),
                               method ='bounded',
                               tol    = self.CalibPar.outer_loop_eps)
-        
+
         self.r        : float = res.x
         self.outer_res = res
-        
-        if res.fun<self.CalibPar.outer_loop_eps: print(f"Outer loop successfull for r={self.r:.4f}.")
-        else                                   : print("Outer loop unsuccessfull for current parameters.")
-        
-        end = time.time()
-        
-        print(f"Model solved in {(end-start)/60}m.")
+
+        total_elapsed = time.time() - run_start
+
+        success = res.fun < self.CalibPar.outer_loop_eps
+        if success: print(f"Outer loop successfull for r={self.r:.4f}.")
+        else      : print("Outer loop unsuccessfull for current parameters.")
+
+        # Write final summary footer
+        SEP = '-' * 87
+        conv_str = "successful" if success else "unsuccessful"
+        with open(self._summary_log_path, 'a') as f:
+            f.write(f"{SEP}\n")
+            f.write(f"Outer loop {conv_str} for r={self.r:.6f} in {total_elapsed:.2f}s.\n")
+            f.write(f"Final: I={self.I:.4f}  w={self.w:.4f}  s={self.s:.4f}  p={self.p:.6f}  r={self.r:.6f}\n")
+            f.write(f"Outer residual: {self.outer_res.fun:.4e}  |  Inner residual: {self.inner_res.fun:.4e}\n")
+
+        print(f"Model solved in {total_elapsed/60:.2f}m.")
         print("")
         print("Results:")
         print(f"I: {self.I} | p: {self.p} | r: {self.r} | s: {self.s} | w: {self.w}")

@@ -9,6 +9,8 @@ import time
 import warnings
 import numpy as np
 import pandas as pd
+import numba as nb
+from scipy.sparse import csr_matrix
 from scipy.optimize import brentq,bisect
 
 def calculate_stationary_distribution_eigenvector(trans_matrix):
@@ -41,7 +43,7 @@ def calculate_stationary_distribution_eigenvector(trans_matrix):
 
     return v
 
-def calculate_stationary_distribution(trans_matrix, tol=1e-10, max_iter=10000):
+def calculate_stationary_distribution(trans_matrix, tol=1e-10, max_iter=100_000):
     '''
     Given a Markov chain transition matrix, it calculates the stationary distribution
     of states in the chain using the iterative method.
@@ -53,7 +55,7 @@ def calculate_stationary_distribution(trans_matrix, tol=1e-10, max_iter=10000):
     tol : float, optional
         Convergence tolerance. The default is 1e-10.
     max_iter : int, optional
-        Maximum number of iterations. The default is 10000.
+        Maximum number of iterations. The default is 100_000.
 
     Returns
     -------
@@ -74,6 +76,76 @@ def calculate_stationary_distribution(trans_matrix, tol=1e-10, max_iter=10000):
     v = v / v.sum()
 
     return v
+
+def calculate_stationary_distribution_endog(pol_func, pol_idx, state_grid, a_grid, joint_trans):
+    '''
+    Finds the endogenous stationary distribution of states after the VFI.
+
+    Parameters
+    ----------
+    pol_func    : dict
+        Dictionary containing the a' and c policy functions for each state of skill type, productivity level z and current asset holdings.
+    pol_idx     : dict
+        Dictionary containing the indices of the optimal grid point in the policy function.
+    state_grid  : list
+        List of tuples containing the possible states for skill type and z.
+    a_grid      : list
+        List of the possible asset holdings states.
+    joint_trans : numpy.ndarray
+        Array with the transition matrix between the states described in state_grid.
+
+    Returns
+    -------
+    stat_dist   : pandas.DataFrame
+        Data Frame with the endogenous stationary distribution of states (skill type, productivity, assets)
+
+    '''
+
+    n_s     : int = len(state_grid)
+    n_assets: int = len(a_grid)
+    n       : int = n_s * n_assets
+
+    # pol_mat[i, a] = index of optimal next asset for state i at current asset a
+    pol_mat: np.ndarray = np.array([pol_idx[st] for st in state_grid], dtype=np.int64)  # (n_s, n_assets)
+
+    # Build sparse COO transition matrix — no Python loops.
+    # For each triple (current_state i, current_asset a, next_state j):
+    #   row = i*n_assets + a
+    #   col = j*n_assets + pol_mat[i, a]   (asset tomorrow is deterministic given policy)
+    #   val = joint_trans[i, j]
+    # All broadcast to shape (n_s, n_assets, n_s).
+    SI: np.ndarray = np.arange(n_s,      dtype=np.int64)[:, None, None]  # (n_s, 1,       1)
+    AI: np.ndarray = np.arange(n_assets, dtype=np.int64)[None, :, None]  # (1,   n_assets, 1)
+    SJ: np.ndarray = np.arange(n_s,      dtype=np.int64)[None, None, :]  # (1,   1,        n_s)
+
+    row_idx: np.ndarray = np.broadcast_to(SI * n_assets + AI,         (n_s, n_assets, n_s))
+    col_idx: np.ndarray = SJ * n_assets + pol_mat[:, :, None]         # (n_s, n_assets, n_s)
+    vals   : np.ndarray = np.broadcast_to(joint_trans[:, None, :],    (n_s, n_assets, n_s))
+
+    end_T_mat: csr_matrix = csr_matrix(
+        (vals.ravel(), (row_idx.ravel(), col_idx.ravel())),
+        shape=(n, n)
+    )
+
+    # Sparse power iteration
+    v: np.ndarray = np.ones(n) / n
+    for _ in range(100_000):
+        v_new: np.ndarray = v @ end_T_mat
+        if np.max(np.abs(v_new - v)) < 1e-10:
+            break
+        v = v_new
+    v = np.maximum(v, 0)
+    v /= v.sum()
+
+    # Build stationary distribution dataframe
+    stat_dist: pd.DataFrame = pd.DataFrame({
+        'skill_type': np.repeat([st[0]         for st in state_grid], n_assets),
+        'z'         : np.repeat([np.exp(st[1]) for st in state_grid], n_assets),
+        'a_0'       : np.tile(a_grid, n_s),
+        'dens'      : v
+    })
+
+    return stat_dist
 
 def Omega(I,ModelPar):
     '''
@@ -646,7 +718,66 @@ def income_func(r,a,z,w,s,L):
     
     return value
 
-def model_vfi(w,s,r,p,income_func,state_grid,joint_trans,ModelPar,CalibPar,print_convergence=True):
+@nb.njit(parallel=True, cache=True)
+def _vfi_core(V, U, joint_trans, delta, eps, howard_steps):
+    '''
+    Numba-compiled VFI core: Policy Improvement + Howard's acceleration. This core has the basic
+    structure of the VFI process I wrote myself. Later, I asked Claude Code to help me 
+    parallalize it using Numba. 
+
+    V           : (n_states, n_assets)        initial value function, modified in place
+    U           : (n_states, n_assets, n_assets)  U[i, a, j] = flow utility for state i,
+                                                   current asset index a, next asset index j
+    joint_trans : (n_states, n_states)         Markov transition matrix
+    '''
+    n_states = V.shape[0]
+    n_assets = V.shape[1]
+    pol = np.zeros((n_states, n_assets), dtype=np.int64)
+
+    cond     = True
+    it_count = 0
+
+    while cond:
+        it_count += 1
+        V_old = V.copy()
+
+        # Policy Improvement — parallel over states (each state writes to its own row)
+        for i in nb.prange(n_states):
+            exp_V = np.dot(joint_trans[i], V_old)   # (n_assets,): E[V(s',a')] for each a'
+            for a in range(n_assets):
+                best_v = -1e300
+                best_j = 0
+                for j in range(n_assets):
+                    v = U[i, a, j] + delta * exp_V[j]
+                    if v > best_v:
+                        best_v = v
+                        best_j = j
+                V[i, a]   = best_v
+                pol[i, a] = best_j
+
+        # Convergence check (cheap serial loop)
+        max_diff = 0.0
+        for i in range(n_states):
+            for a in range(n_assets):
+                d = abs(V[i, a] - V_old[i, a])
+                if d > max_diff:
+                    max_diff = d
+        cond = max_diff > eps
+
+        # Howard's Policy Evaluation — parallel over states
+        if cond:
+            for _ in range(howard_steps):
+                V_old = V.copy()
+                for i in nb.prange(n_states):
+                    exp_V = np.dot(joint_trans[i], V_old)
+                    for a in range(n_assets):
+                        j        = pol[i, a]
+                        V[i, a]  = U[i, a, j] + delta * exp_V[j]
+
+    return V, pol, it_count
+
+
+def model_vfi(w,s,r,p,income_func,state_grid,joint_trans,ModelPar,CalibPar,print_convergence=True,V_init=None):
     '''
     Value Function Iteration of the household's problem solution. Given an economy state defined by
     w,s,r,p derived from the supply-side equilibrium, it solves the household problem using as
@@ -688,145 +819,61 @@ def model_vfi(w,s,r,p,income_func,state_grid,joint_trans,ModelPar,CalibPar,print
 
     '''
     
-    start : float = time.time()
-    
-    # Discretization settings
-    ub    : float = max(w,s) * CalibPar.vfi_ubmul
-    dist  : float = (ub-CalibPar.vfi_lb)/CalibPar.vfi_N
-    a_grid: list  = [CalibPar.vfi_lb+(i*dist) for i in range(0,CalibPar.vfi_N+1)]
-    
-    # Initializing value function, policy function
-    V       : dict = {st: np.zeros(len(a_grid)) for st in state_grid}
-    pol_func: dict = {i: np.array(range(0,CalibPar.vfi_N+1)) for i in state_grid}
-    
-    # Initializing the current utility values in the grid
-    U    : dict       = {}
-    a_arr: np.ndarray = np.array(a_grid)
-    psi_p: float      = psi(p, ModelPar)
-    
-    for (f, z) in state_grid:
-        L: int = 1 if f == 'L' else 0
-        
+    start: float = time.time()
+
+    # Asset grid
+    ub      : float      = max(w, s) * CalibPar.vfi_ubmul
+    dist    : float      = (ub - CalibPar.vfi_lb) / CalibPar.vfi_N
+    a_grid  : list       = [CalibPar.vfi_lb + (i * dist) for i in range(CalibPar.vfi_N + 1)]
+    a_arr   : np.ndarray = np.array(a_grid)
+    n_assets: int        = len(a_grid)
+    n_states: int        = len(state_grid)
+    psi_p   : float      = psi(p, ModelPar)
+
+    # Build U array: U_arr[i, a, j] = flow utility for state i, current asset a, next asset j
+    # u_grid has shape (n_assets_prime, n_assets_current) so we transpose to (n_assets_current, n_assets_prime)
+    U_arr: np.ndarray = np.empty((n_states, n_assets, n_assets))
+    for idx, (f, z) in enumerate(state_grid):
+        L      : int        = 1 if f == 'L' else 0
         inc_vec: np.ndarray = income_func(r=r, a=a_arr, z=np.exp(z), w=w, s=s, L=L)
         c_grid : np.ndarray = inc_vec[None, :] - a_arr[:, None]
         c_safe : np.ndarray = np.maximum(c_grid, 1e-10)
+        u_grid : np.ndarray = np.where(c_grid > 0, (psi_p * c_safe) ** (1 - ModelPar.σ) / (1 - ModelPar.σ), -1e25)
+        U_arr[idx] = u_grid.T  # (a_current, a_prime)
 
-        u_grid : np.ndarray = np.where(c_grid > 0,(psi_p * c_safe) ** (1 - ModelPar.σ) / (1 - ModelPar.σ),-1e25)
-        U[(f, z)] = u_grid
-            
-    cond    : bool = True
-    it_count: int  = 0
-    
-    # Value Function Iteration
-    while cond:
-        it_count += 1
-        conds: list = []
-        
-        # Policy Improvement
-        for state, i in zip(state_grid, range(len(state_grid))):
-            trans_probs: np.ndarray = joint_trans[i]
-            prev_V     : np.ndarray = V[state]
-            exp_V      : np.ndarray = sum([V[st] * trans_probs[j] for st, j in zip(state_grid, range(len(trans_probs)))])
-            
-            v_grid: np.ndarray = U[state] + ModelPar.δ * exp_V[:, None]
-            next_V: np.ndarray = v_grid.max(axis=0)
-            
-            V[state]        = next_V
-            pol_func[state] = v_grid.argmax(axis=0)
-            
-            sub_cond: bool = np.max(np.abs(next_V - prev_V)) > CalibPar.vfi_eps
-            conds.append(sub_cond)
-        
-        cond = any(conds)
-        
-        # Policy Evaluation (Howard's Method)
-        if cond:
-            for _ in range(CalibPar.vfi_howard_steps):
-                for state, i in zip(state_grid, range(len(state_grid))):
-                    trans_probs: np.ndarray = joint_trans[i]
-                    exp_V      : np.ndarray = sum([V[st] * trans_probs[j] for st, j in zip(state_grid, range(len(trans_probs)))])
-                    a_prime_idx: np.ndarray = pol_func[state]
-                    
-                    V[state] = np.array([U[state][a_prime_idx[k], k] + ModelPar.δ * exp_V[a_prime_idx[k]] for k in range(len(a_grid))])
+    # Run parallelized VFI core (warm-start from previous solution if available)
+    V_arr, pol_arr, it_count = _vfi_core(
+        V_init.copy() if V_init is not None else np.zeros((n_states, n_assets)),
+        U_arr,
+        joint_trans.astype(np.float64),
+        float(ModelPar.δ),
+        float(CalibPar.vfi_eps),
+        int(CalibPar.vfi_howard_steps)
+    )
 
-    # Gathering discounted utilities (= converged value function) by state
-    val_func   : dict = {state: V[state].copy() for state in state_grid}
-    df_val_func: pd.DataFrame = pd.concat([pd.DataFrame({'a_0': a_grid, 'skill_type': state[0], 'z': np.exp(state[1]), 'V': val_func[state]})for state in state_grid]).reset_index(drop=True)
+    # Value function DataFrame
+    df_val_func: pd.DataFrame = pd.concat([
+        pd.DataFrame({'a_0': a_grid, 'skill_type': state[0], 'z': np.exp(state[1]), 'V': V_arr[i]})
+        for i, state in enumerate(state_grid)
+    ]).reset_index(drop=True)
 
-    # Save indices before creating the policy function dataframes
-    pol_idx: dict = {state: pol_func[state].copy() for state in pol_func}
-    
-    for state in pol_func.keys():
+    # Policy indices dict
+    pol_idx: dict = {state: pol_arr[i].copy() for i, state in enumerate(state_grid)}
+
+    # Policy function DataFrames (vectorized consumption — avoids slow iterrows)
+    pol_func: dict = {}
+    for i, state in enumerate(state_grid):
         f, z   = state
         L: int = 1 if f == 'L' else 0
-        
-        pol_func[state]         = pd.Series({a: a_grid[idx] for a, idx in zip(a_grid, pol_func[state])}).reset_index()
-        pol_func[state].columns = ['a_0', 'a_1']        
-        pol_func[state]['c']    = [income_func(r=r, a=row['a_0'], z=np.exp(z), w=w, s=s, L=L) - row['a_1'] for _, row in pol_func[state].iterrows()]
-    
+        idxs   = pol_arr[i]
+        df                  = pd.DataFrame({'a_0': a_grid, 'a_1': a_arr[idxs]})
+        df['c']             = income_func(r=r, a=df['a_0'].values, z=np.exp(z), w=w, s=s, L=L) - df['a_1'].values
+        pol_func[state]     = df
+
     end: float = time.time() - start
-    if print_convergence: print(f'Convergence after {end}s and {it_count} iterations')
-    
-    return pol_func, pol_idx, a_grid, df_val_func
+    if print_convergence: print(f'Convergence after {end:.2f}s and {it_count} iterations')
 
-def endog_stationary_distribution(pol_func, pol_idx, state_grid, a_grid, joint_trans):
-    '''
-    Finds the endogenous stationary distribution of states after the VFI.
-
-    Parameters
-    ----------
-    pol_func    : dict
-        Dictionary containing the a' and c policy functions for each state of skill type, productivity level z and current asset holdings.
-    pol_idx     : dict
-        Dictionary containing the indices of the optimal grid point in the policy function.
-    state_grid  : list
-        List of tuples containing the possible states for skill type and z.
-    a_grid      : list
-        List of the possible asset holdings states.
-    joint_trans : numpy.ndarray
-        Array with the transition matrix between the states described in state_grid.
-
-    Returns
-    -------
-    stat_dist   : pandas.DataFrame
-        Data Frame with the endogenous stationary distribution of states (skill type, productivity, assets)
-
-    '''
-    
-    # Creates a matrix M indicating for each state of skill type and productivity, 
-    # the mapping of current assets to future assets (a->a')
-    M_list: dict = {}
-    for state in state_grid:
-        M: np.ndarray = np.zeros((len(a_grid), len(a_grid)))
-        for i in range(len(a_grid)):
-            j: int  = pol_idx[state][i]
-            M[i, j] = 1
-        M_list[state] = M
-    
-    # Builds the joint transition matrix over (skill, z, a) by combining
-    # exogenous state transitions with the endogenous asset policy.
-    n_s   : int  = len(state_grid)
-    blocks: list = []
-    for i in range(n_s):
-        row_blocks: list = [joint_trans[i, j] * M_list[state_grid[i]] for j in range(n_s)]
-        blocks.append(row_blocks)
-    
-    # Builds the endogenous transition matrix and its stationary distribution
-    end_T_mat      : np.ndarray = np.block(blocks)
-    stat_dist_endog: np.ndarray = calculate_stationary_distribution(end_T_mat)
-    
-    # Builds a stationary distribution dataframe
-    N   : int  = len(a_grid)
-    rows: list = []
-    
-    for i, (f, z) in enumerate(state_grid):
-        for k, a in enumerate(a_grid):
-            dens: float = stat_dist_endog[i * N + k]
-            rows.append({'skill_type': f, 'z': np.exp(z), 'a_0': a, 'dens': dens})
-    
-    stat_dist: pd.DataFrame = pd.DataFrame(rows)
-    
-    return stat_dist
+    return pol_func, pol_idx, a_grid, df_val_func, V_arr, it_count
 
 def full_model_result(pol_func, state_grid, stat_dist, df_val_func, p, ModelPar):
     '''
@@ -940,10 +987,6 @@ def inner_loop_residual(p,w,s,I,mod_res,ModelPar,CalibPar):
         ret: float = 0.0
         
     else:
-        if L_supply>L_demand:
-            print('Low-skill supply>demand. Adjusting p.')
-        else:
-            print('Low-skill supply<demand. Adjusting p.')
         ret: float = L_supply-L_demand
     
     return ret
@@ -993,10 +1036,6 @@ def outer_loop_residual(p,r,mod_res,ModelPar,CalibPar):
         ret: float = 0.0
         
     else:
-        if K_supply>K_demand:
-            print('Capital supply>demand. Adjusting r.')
-        else:
-            print('Capital supply<demand. Adjusting r.')
         ret: float = K_supply-K_demand
     
     return ret
