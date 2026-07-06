@@ -74,14 +74,14 @@ def calculate_stationary_distribution(trans_matrix, tol=1e-10, max_iter=100_000)
 
     return v
 
-def calculate_stationary_distribution_endog(pol_func, pol_idx, state_grid, a_grid, joint_trans):
+def calculate_stationary_distribution_endog(pol_idx, state_grid, a_grid, joint_trans):
     '''
-    Finds the endogenous stationary distribution of states after the VFI.
+    Finds the endogenous stationary distribution of states after the VFI. Uses a more efficient method 
+    of compresses sparse row (CSR) matrices, which takes advantage of the fact that the endgeonous 
+    transition matrix is sparse.
 
     Parameters
     ----------
-    pol_func    : dict
-        Dictionary containing the a' and c policy functions for each state of skill type, productivity level z and current asset holdings.
     pol_idx     : dict
         Dictionary containing the indices of the optimal grid point in the policy function.
     state_grid  : list
@@ -105,7 +105,7 @@ def calculate_stationary_distribution_endog(pol_func, pol_idx, state_grid, a_gri
     # pol_mat[i, a] = index of optimal next asset for state i at current asset a
     pol_mat: np.ndarray = np.array([pol_idx[st] for st in state_grid], dtype=np.int64)  # (n_s, n_assets)
 
-    # Build sparse COO transition matrix — no Python loops.
+    # Build sparse COO transition matrix
     SI: np.ndarray = np.arange(n_s,      dtype=np.int64)[:, None, None]  # (n_s, 1,       1)
     AI: np.ndarray = np.arange(n_assets, dtype=np.int64)[None, :, None]  # (1,   n_assets, 1)
     SJ: np.ndarray = np.arange(n_s,      dtype=np.int64)[None, None, :]  # (1,   1,        n_s)
@@ -141,7 +141,10 @@ def calculate_stationary_distribution_endog(pol_func, pol_idx, state_grid, a_gri
 
 def Omega(I, ModelPar):
     '''
-    Defines function Ω(I) = (1-I) + I/(θ+1).
+    Defines function Ω(I), the offshoring cost index.
+
+    Quadratic:   Ω(I) = (1-I) + I/(θ+1)
+    Exponential: Ω(I) = (1-I) + (1 - e^(-θI))/θ
 
     Parameters
     ----------
@@ -157,13 +160,19 @@ def Omega(I, ModelPar):
 
     '''
 
-    value: float = (1-I) + (I / (ModelPar.θ + 1))
+    if ModelPar.t_form == 'exponential':
+        value: float = (1 - I) + (1 - np.exp(-ModelPar.θ * I)) / ModelPar.θ
+    else:  # 'quadratic'
+        value: float = (1 - I) + (I / (ModelPar.θ + 1))
 
     return value
 
 def t(i, ModelPar):
     '''
-    Defines function t(i) = i^θ, the offshoring cost function for task i.
+    Defines the offshoring cost function for task i.
+
+    Quadratic:   t(i) = i^θ
+    Exponential: t(i) = e^(θi)
 
     Parameters
     ----------
@@ -179,7 +188,10 @@ def t(i, ModelPar):
 
     '''
 
-    value: float = i ** ModelPar.θ
+    if ModelPar.t_form == 'exponential':
+        value: float = np.exp(ModelPar.θ * i)
+    else:  # 'quadratic'
+        value: float = i ** ModelPar.θ
 
     return value
 
@@ -271,15 +283,15 @@ def rouwenhorst_trans_matrix(ModelPar, CalibPar):
 
 def solve_representative_household(I_0, ModelPar):
     '''
-    For a given I_0, solves the one-good representative household model.
+    For a given I_0, solves the representative household model.
 
     Given I_0:
-      (1) r from Euler equation
-      (2) w from MT condition: w = w*·β·I^θ
-      (3) s from ZCP (one good, closed form)
-      (4) Y from H market clearing: α·Y/s = H = b[1]
-      (5) K_d from K market clearing: γ·Y/r
-      (6) K_s from SS budget constraint: Y = r·K_s + b[0]·w + b[1]·s
+      (1) r from Euler equation -> (EE)
+      (2) w from MT condition: w = w*·β·t(I) -> (RA)
+      (3) s from ZCP -> (RB)
+      (4) Y from H market clearing: α·Y/s = H -> (RD)
+      (5) K from K market clearing: γ·Y/r = K -> (RE)
+      (6) Y_L from L market clearing: κ⋅Y/w⋅Ω=L/(1-I) -> (RC)
 
     Part of: solve_representative_household -> representative_household_residual
              -> representative_household_wrapper
@@ -294,37 +306,37 @@ def solve_representative_household(I_0, ModelPar):
     Returns
     -------
     dict
-        Solution dictionary with keys: w, s, r, Y, I, K_d, K_s.
+        Solution dictionary with keys: w, s, r, Y, I, K, Y_L.
 
     '''
 
-    r      : float = (1 - ModelPar.δ) / ModelPar.δ
-    w_0    : float = ModelPar.w_star * ModelPar.β * t(I_0, ModelPar)
+    r      : float = (1 - ModelPar.δ) / ModelPar.δ                           # (EE)
+    w_0    : float = ModelPar.w_star * ModelPar.β * t(I_0, ModelPar)         # (RA)
     omega0 : float = Omega(I_0, ModelPar)
     κ      : float = 1 - ModelPar.α - ModelPar.γ
 
     log_s_0: float = (np.log(ModelPar.α)
                       - (κ / ModelPar.α) * np.log(w_0 * omega0 / κ)
-                      - (ModelPar.γ / ModelPar.α) * np.log(r / ModelPar.γ))
+                      - (ModelPar.γ / ModelPar.α) * np.log(r / ModelPar.γ))  # (RB)
     s_0    : float = np.exp(log_s_0)
 
     b  : np.ndarray = calculate_stationary_distribution_eigenvector(create_LH_skill_mat(ModelPar))
-    Y_0: float      = s_0 * b[1] / ModelPar.α
-    K_d: float      = ModelPar.γ * Y_0 / r
-    K_s: float      = (Y_0 - b[0] * w_0 - b[1] * s_0) / r
+
+    Y_0: float      = s_0 * b[1] / ModelPar.α                                # (RD)
+    K_0: float      = ModelPar.γ * Y_0 / r                                   # (RE)
+    Y_L: float      = (w_0 * Ω * b[0])/(κ * (1-I_0))                         # (RC)
 
     return {'w'  : w_0,
             's'  : s_0,
             'r'  : r,
             'Y'  : Y_0,
             'I'  : I_0,
-            'K_d': K_d,
-            'K_s': K_s}
+            'K'  : K_0,
+            'Y_L': Y_L}
 
 def representative_household_residual(I_0, ModelPar):
     '''
-    Returns K_d - K_s for a given guess of I. Used in bisection to find the
-    equilibrium I.
+    Returns Y_L - Y for a given guess of I. Used in bisection to find the equilibrium I.
 
     Parameters
     ----------
@@ -336,13 +348,13 @@ def representative_household_residual(I_0, ModelPar):
     Returns
     -------
     float
-        Difference between capital demand and supply.
+        Difference between output from capital market clearing and L-labour market clearing.
 
     '''
 
     sol = solve_representative_household(I_0=I_0, ModelPar=ModelPar)
 
-    return sol['K_d'] - sol['K_s']
+    return sol['Y_L'] - sol['Y']
 
 def representative_household_wrapper(ModelPar):
     '''
@@ -367,8 +379,8 @@ def representative_household_wrapper(ModelPar):
     equilibrium: dict       = solve_representative_household(I_0=root, ModelPar=ModelPar)
     b          : np.ndarray = calculate_stationary_distribution_eigenvector(create_LH_skill_mat(ModelPar))
 
-    a_L: float = equilibrium['K_s'] * equilibrium['w'] / (b[0]*equilibrium['w'] + b[1]*equilibrium['s'])
-    a_H: float = equilibrium['K_s'] * equilibrium['s'] / (b[0]*equilibrium['w'] + b[1]*equilibrium['s'])
+    a_L: float = equilibrium['K'] * equilibrium['w'] / (b[0]*equilibrium['w'] + b[1]*equilibrium['s'])
+    a_H: float = equilibrium['K'] * equilibrium['s'] / (b[0]*equilibrium['w'] + b[1]*equilibrium['s'])
 
     C_L: float = equilibrium['r'] * a_L + equilibrium['w']
     C_H: float = equilibrium['r'] * a_H + equilibrium['s']
@@ -400,62 +412,17 @@ def Theta(I, ModelPar):
 
     return ModelPar.θ * (1 - I)
 
-def hat_algebra_sysmem(I, ModelPar):
-    '''
-    Hat-algebra expression for w_hat/beta_hat as a function of I (one-good model).
-    From PDF Section 6: w_hat = beta_hat * I * (α - κΘ) / (α(Θ²+Θ+I) + κΘ(Θ+1-I))
-    '''
-
-    Θ: float = Theta(I, ModelPar)
-    κ: float = 1 - ModelPar.α - ModelPar.γ
-
-    numerator  : float = ModelPar.α - κ * Θ
-    denominator: float = ModelPar.α * (Θ**2 + Θ + I) + κ * Θ * (Θ + 1 - I)
-
-    return I * (numerator / denominator)
-
-def solve_wages_given_I(I_0, r, ModelPar):
-    '''
-    Given marginal task I_0 and interest rate r, returns (w, s) using the
-    MT condition and the one-good ZCP.
-
-    Used by solve_representative_household and for verification.
-
-    Parameters
-    ----------
-    I_0 : float
-        Marginal task index.
-    r : float
-        Interest rate.
-    ModelPar : TypeModelParameters
-        Model parameters.
-
-    Returns
-    -------
-    list
-        [w, s] — low-skill and high-skill wages.
-
-    '''
-
-    w_0    : float = ModelPar.w_star * ModelPar.β * t(I_0, ModelPar)
-    omega0 : float = Omega(I_0, ModelPar)
-    κ      : float = 1 - ModelPar.α - ModelPar.γ
-    log_s_0: float = (np.log(ModelPar.α)
-                      - (κ / ModelPar.α) * np.log(w_0 * omega0 / κ)
-                      - (ModelPar.γ / ModelPar.α) * np.log(r / ModelPar.γ))
-    s_0    : float = np.exp(log_s_0)
-
-    return [w_0, s_0]
-
-def solve_firm_side_one_good(w, r, ModelPar):
+def solve_firm_side(w, r, ModelPar):
     '''
     Given domestic low-skill wage w and interest rate r, computes the firm-side
-    equilibrium analytically for the one-good model.
+    equilibrium analytically.
 
     Steps:
-      (1) I = (w / (w*·β))^(1/θ)       from MT condition
-      (2) Ω = (1-I) + I/(θ+1)           offshoring cost index
-      (3) s from one-good ZCP (closed form)
+      (1) I from MT condition (form depends on t_form):
+            quadratic:   I = (w / (w*·β))^(1/θ)
+            exponential: I = ln(w / (w*·β)) / θ
+      (2) Ω = Omega(I, ModelPar)         offshoring cost index
+      (3) s from ZCP (closed form)
 
     Parameters
     ----------
@@ -473,7 +440,11 @@ def solve_firm_side_one_good(w, r, ModelPar):
 
     '''
 
-    I    : float = (w / (ModelPar.w_star * ModelPar.β)) ** (1.0 / ModelPar.θ)
+    if ModelPar.t_form == 'exponential':
+        I: float = np.log(w / (ModelPar.w_star * ModelPar.β)) / ModelPar.θ
+    else:  # 'quadratic'
+        I: float = (w / (ModelPar.w_star * ModelPar.β)) ** (1.0 / ModelPar.θ)
+    
     Ω    : float = Omega(I, ModelPar)
     κ    : float = 1 - ModelPar.α - ModelPar.γ
     log_s: float = (np.log(ModelPar.α)
@@ -486,7 +457,7 @@ def solve_firm_side_one_good(w, r, ModelPar):
 def utility_func(inc, a_1, ModelPar):
     '''
     CRRA utility for a household with income inc choosing next-period assets a_1.
-    One-good model: U(c) = c^(1-σ)/(1-σ).
+    U(c) = c^(1-σ)/(1-σ).
 
     Parameters
     ----------
@@ -532,7 +503,7 @@ def income_func(r, a, z, w, s, L):
 
     Returns
     -------
-    float
+    value: float
         Household income.
 
     '''
@@ -543,13 +514,29 @@ def income_func(r, a, z, w, s, L):
 
 @nb.njit(parallel=True, cache=True)
 def _vfi_core(V, U, joint_trans, delta, eps, howard_steps):
-    '''
-    Numba-compiled VFI core: Policy Improvement + Howard's acceleration.
+    """
+    Numba-compiled (parallel) VFI core: Policy Improvement + Howard's acceleration. With the help from Claude.
 
-    V           : (n_states, n_assets)           initial value function
-    U           : (n_states, n_assets, n_assets)  flow utility array
-    joint_trans : (n_states, n_states)            Markov transition matrix
-    '''
+    Parameters
+    ----------
+    V : numpy.ndarray
+        (n_states, n_assets), initial value function
+    U : numpy.ndarray
+        (n_states, n_assets, n_assets), flow utility array
+    joint_trans : numpy.ndarray
+        (n_states, n_states), Markov transition matrix
+    
+    Returns
+    -------
+    V: numpy.ndarray
+        Converged value function.
+    pol: numpy.ndarray
+        Converged policy function (next assets state, given current assets state).
+    it_count: int
+        Number of iterations to reach convergence.
+
+    """
+    
     n_states = V.shape[0]
     n_assets = V.shape[1]
     pol = np.zeros((n_states, n_assets), dtype=np.int64)
@@ -561,7 +548,7 @@ def _vfi_core(V, U, joint_trans, delta, eps, howard_steps):
         it_count += 1
         V_old = V.copy()
 
-        # Policy Improvement — parallel over states
+        # Policy Improvement (parallel over states)
         for i in nb.prange(n_states):
             exp_V = np.dot(joint_trans[i], V_old)
             for a in range(n_assets):
@@ -596,13 +583,11 @@ def _vfi_core(V, U, joint_trans, delta, eps, howard_steps):
 
     return V, pol, it_count
 
+def model_vfi(w, s, r, income_func, state_grid, joint_trans, ModelPar, CalibPar, print_convergence=True, V_init=None):
+    """
+    Value Function Iteration for the household problem.
 
-def model_vfi(w, s, r, income_func, state_grid, joint_trans, ModelPar, CalibPar,
-              print_convergence=True, V_init=None):
-    '''
-    Value Function Iteration for the one-good household problem.
-
-    Utility: U(c) = c^(1-σ)/(1-σ). No price index needed.
+    Utility: U(c) = c^(1-σ)/(1-σ).
 
     Parameters
     ----------
@@ -630,23 +615,29 @@ def model_vfi(w, s, r, income_func, state_grid, joint_trans, ModelPar, CalibPar,
     Returns
     -------
     pol_func : dict
+        Policy function dictionary (if in state (a,f,z), go to state a'(a,f,z))
     pol_idx  : dict
+        If in asset grid i, go to the index value of the assets grid
     a_grid   : list
+        Assets grid
     df_val_func : pandas.DataFrame
+        Complete VFI results dataframe. Contains state (a_0, skill_type, z) and the corresponding utility value of the state
     V_arr    : numpy.ndarray
+        Array with the utility values of the value functions
     it_count : int
+        Number of iterations to reach convergence.
 
-    '''
+    """
 
-    start   : float = time.time()
-    ub      : float = max(w, s) * CalibPar.vfi_ubmul
-    dist    : float = (ub - CalibPar.vfi_lb) / CalibPar.vfi_N
-    a_grid  : list  = [CalibPar.vfi_lb + (i * dist) for i in range(CalibPar.vfi_N + 1)]
+    start   : float      = time.time()
+    ub      : float      = max(w, s) * CalibPar.vfi_ubmul
+    dist    : float      = (ub - CalibPar.vfi_lb) / CalibPar.vfi_N
+    a_grid  : list       = [CalibPar.vfi_lb + (i * dist) for i in range(CalibPar.vfi_N + 1)]
     a_arr   : np.ndarray = np.array(a_grid)
     n_assets: int        = len(a_grid)
     n_states: int        = len(state_grid)
 
-    # U[i, a, j] = u(income_a - a'_j) for state i, current asset index a, next asset index j
+    # U[i, a, j] = u(income_a - a') for state i, current asset index a, next asset index j
     U_arr: np.ndarray = np.empty((n_states, n_assets, n_assets))
     for idx, (f, z) in enumerate(state_grid):
         L      : int        = 1 if f == 'L' else 0
@@ -659,12 +650,12 @@ def model_vfi(w, s, r, income_func, state_grid, joint_trans, ModelPar, CalibPar,
         U_arr[idx] = u_grid.T  # (a_current, a_prime)
 
     V_arr, pol_arr, it_count = _vfi_core(
-        V_init.copy() if V_init is not None else np.zeros((n_states, n_assets)),
-        U_arr,
-        joint_trans.astype(np.float64),
-        float(ModelPar.δ),
-        float(CalibPar.vfi_eps),
-        int(CalibPar.vfi_howard_steps)
+        V            = V_init.copy() if V_init is not None else np.zeros((n_states, n_assets)),
+        U            = U_arr,
+        joint_trans  = joint_trans,
+        delta        = ModelPar.δ,
+        eps          = CalibPar.vfi_eps,
+        howard_steps = CalibPar.vfi_howard_steps
     )
 
     df_val_func: pd.DataFrame = pd.concat([
@@ -690,25 +681,29 @@ def model_vfi(w, s, r, income_func, state_grid, joint_trans, ModelPar, CalibPar,
     return pol_func, pol_idx, a_grid, df_val_func, V_arr, it_count
 
 def full_model_result(pol_func, state_grid, stat_dist, df_val_func, ModelPar):
-    '''
-    Assembles the full model result dataframe (one-good version).
+    """
+    Assembles the full model result dataframe.
 
-    For each state (skill_type, z, a_0) provides:
-      a_1, c (consumption of Y), dens (stationary distribution), V (value function).
+    For each state (skill_type, z, a_0) provides: a_1, c (consumption of Y), dens (stationary distribution), V (value function).
 
     Parameters
     ----------
     pol_func : dict
+        Policy function dictionary (if in state (a,f,z), go to state a'(a,f,z))
     state_grid : list
-    stat_dist : pandas.DataFrame
+        List of (skill_type, log_z) tuples.
+    stat_dist   : pandas.DataFrame
+        Data Frame with the endogenous stationary distribution of states (skill type, productivity, assets)
     df_val_func : pandas.DataFrame
+        Complete VFI results dataframe. Contains state (a_0, skill_type, z) and the corresponding utility value of the state
     ModelPar : TypeModelParameters
+        Model parameters
 
     Returns
     -------
     pandas.DataFrame
 
-    '''
+    """
 
     df_pol_func: pd.DataFrame = pd.concat([
         pol_func[state].assign(skill_type=state[0], z=np.exp(state[1]))
@@ -724,8 +719,8 @@ def full_model_result(pol_func, state_grid, stat_dist, df_val_func, ModelPar):
     return result
 
 def inner_loop_residual(w, r, H, L, ModelPar):
-    '''
-    L-market clearing residual for the inner loop (one-good model).
+    """
+    L-market clearing residual for the inner loop.
 
     Given w (inner loop guess) and r (outer loop), computes the equilibrium
     firm-side analytically and returns the excess demand for L-tasks.
@@ -753,17 +748,17 @@ def inner_loop_residual(w, r, H, L, ModelPar):
     float
         L-market clearing residual.
 
-    '''
+    """
 
-    I, Ω, s = solve_firm_side_one_good(w, r, ModelPar)
+    I, Ω, s = solve_firm_side(w, r, ModelPar)
     Y       : float = s * H / ModelPar.α
     κ       : float = 1 - ModelPar.α - ModelPar.γ
 
     return κ * Y / (w * Ω) - L / (1 - I)
 
 def outer_loop_residual(r, Y, mod_res, ModelPar, CalibPar):
-    '''
-    Capital market clearing residual for the outer loop (one-good model).
+    """
+    Capital market clearing residual for the outer loop.
 
     K_supply = Σ a·dens   (from VFI stationary distribution)
     K_demand = γ·Y / r    (from firm-side K market clearing condition RE)
@@ -786,7 +781,7 @@ def outer_loop_residual(r, Y, mod_res, ModelPar, CalibPar):
     float
         K_supply - K_demand.
 
-    '''
+    """
 
     K_supply: float = (mod_res['dens'] * mod_res['a_0']).sum()
     K_demand: float = ModelPar.γ * Y / r
@@ -800,7 +795,7 @@ def outer_loop_residual(r, Y, mod_res, ModelPar, CalibPar):
     return K_supply - K_demand
 
 def weighted_gini(x, weights):
-    '''
+    """
     Calculates the Gini index of a vector with different weights.
 
     Parameters
@@ -815,7 +810,7 @@ def weighted_gini(x, weights):
     gini : float
         Weighted Gini Index.
 
-    '''
+    """
 
     sorted_idx: pd.Series = np.argsort(x)
     x_sorted  : pd.Series = x[sorted_idx]
@@ -833,7 +828,7 @@ def weighted_gini(x, weights):
     return gini
 
 def weighted_percentile(x, weights, q):
-    '''
+    """
     Calculates the share of x and the value of x at percentile q.
 
     Parameters
@@ -852,7 +847,7 @@ def weighted_percentile(x, weights, q):
     perc_income : float
         Value of x at percentile q.
 
-    '''
+    """
 
     sorted_idx: pd.Series = np.argsort(x)
     x_sorted  : pd.Series = x[sorted_idx]

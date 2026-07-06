@@ -33,6 +33,7 @@ class TypeModelParameters:
     π_LL  : float   # prob(stay L | L)
     π_HH  : float   # prob(stay H | H)
     M     : float   # mass of households
+    t_form: str = 'exponential'  # 'quadratic' → i^θ | 'exponential' → e^(θi)
 
 @dataclass
 class TypeCalibParameters:
@@ -53,11 +54,13 @@ class TypeCalibParameters:
 
 class GeneralEquilibriumModel:
 
-    def __init__(self, ModelPar, CalibPar, log_dir="auto"):
+    def __init__(self, ModelPar, CalibPar, log_dir="auto", log_inner=True, log_summary_name='run_summary.log'):
 
-        self.ModelPar     = ModelPar
-        self.CalibPar     = CalibPar
-        self._log_dir_arg = log_dir
+        self.ModelPar          = ModelPar
+        self.CalibPar          = CalibPar
+        self._log_dir_arg      = log_dir
+        self._log_inner        = log_inner
+        self._log_summary_name = log_summary_name
 
         self.w            = None
         self.s            = None
@@ -67,10 +70,7 @@ class GeneralEquilibriumModel:
         self.mod_res      = None
         self._vfi_V_cache = None
 
-        # Precompute H and L from exogenous stochastic processes (no VFI needed).
-        # H = b[1] · E[z],  L = b[0] · E[z]
-        # where b is the stationary distribution of the LH skill Markov chain
-        # and E[z] is the mean of the Rouwenhorst z-grid under its stationary distribution.
+        # Calculates steady-state H and L from exogenous stochastic process
         self.H, self.L = self._compute_HL_supply()
 
         # Logging state
@@ -83,19 +83,27 @@ class GeneralEquilibriumModel:
         self._inner_w_residual  = None
 
     def _compute_HL_supply(self):
-        '''
-        Computes aggregate high-skill (H) and low-skill (L) labour supply from the
-        exogenous stochastic processes alone (no VFI required).
+        """
+        Computes H and L supplies in steady-state from the exogenous stochastic process
 
-        H = b[1] · E[z]   (fraction H-type × mean productivity)
-        L = b[0] · E[z]
-        '''
-        z_grid, trans_z = functions.rouwenhorst_trans_matrix(self.ModelPar, self.CalibPar)
-        Pi_z_stat       = functions.calculate_stationary_distribution(trans_z)
-        b               = functions.calculate_stationary_distribution_eigenvector(functions.create_LH_skill_mat(self.ModelPar))
-        E_z: float = float(np.sum(np.exp(z_grid) * Pi_z_stat))
-        H  : float = float(b[1] * E_z)
-        L  : float = float(b[0] * E_z)
+        Returns
+        -------
+        H : float
+            Mass of high-skilled households in steady-state
+        L : float
+            Mass of low-skilled households in steady-state
+        
+        """
+
+        z_grid, trans_z = functions.rouwenhorst_trans_matrix(ModelPar=self.ModelPar, CalibPar=self.CalibPar)
+        z_stat_dist     = functions.calculate_stationary_distribution(trans_matrix=trans_z)
+        trans_skill     = functions.create_LH_skill_mat(self.ModelPar)
+        skill_stat_dist = functions.calculate_stationary_distribution_eigenvector(trans_matrix=trans_skill)
+
+        mean_z: float = float(np.sum(np.exp(z_grid) * z_stat_dist))
+        H     : float = float(skill_stat_dist[1] * mean_z)
+        L     : float = float(skill_stat_dist[0] * mean_z)
+
         return H, L
 
     # ------------------------------------------------------------------
@@ -115,7 +123,7 @@ class GeneralEquilibriumModel:
         else:
             self._log_dir = self._log_dir_arg
 
-        self._summary_log_path = os.path.join(self._log_dir, 'run_summary.log')
+        self._summary_log_path = os.path.join(self._log_dir, self._log_summary_name)
 
         SEP = '-' * 87
         par = self.ModelPar
@@ -137,20 +145,22 @@ class GeneralEquilibriumModel:
             f.write(f"{self._inner_eval_count:>7}  {w:>12.6f}  {residual:>+14.6e}\n")
 
     def _log_outer_eval(self, r, outer_residual, total_elapsed):
-        if self._current_inner_log is None:
+        if self._log_dir is None:
             return
 
         SEP = '-' * 87
-        inner_ok = self._inner_w_residual is not None and abs(self._inner_w_residual) < self.CalibPar.inner_loop_eps
-        conv_str = "successful" if inner_ok else "unsuccessful"
+        inner_ok  = self._inner_w_residual is not None and abs(self._inner_w_residual) < self.CalibPar.inner_loop_eps
+        conv_str  = "successful" if inner_ok else "unsuccessful"
         w_val     = self.w                if self.w                is not None else float('nan')
         resid_val = self._inner_w_residual if self._inner_w_residual is not None else float('nan')
-        with open(self._current_inner_log, 'a', encoding='utf-8') as f:
-            f.write(f"{SEP}\n")
-            f.write(
-                f"Inner loop {conv_str} for w={w_val:.6f} in {total_elapsed:.2f}s."
-                f"  Outer residual: {outer_residual:+.4e}.\n"
-            )
+
+        if self._current_inner_log is not None:
+            with open(self._current_inner_log, 'a', encoding='utf-8') as f:
+                f.write(f"{SEP}\n")
+                f.write(
+                    f"Inner loop {conv_str} for w={w_val:.6f} in {total_elapsed:.2f}s."
+                    f"  Outer residual: {outer_residual:+.4e}.\n"
+                )
 
         with open(self._summary_log_path, 'a', encoding='utf-8') as f:
             f.write(
@@ -163,25 +173,121 @@ class GeneralEquilibriumModel:
     # Model solution methods
     # ------------------------------------------------------------------
 
+    def solve_representative_household(self):
+        """
+        Solves the analytical representative household equilibrium.
+        Sets self.rep_hh_res.
+        """
+
+        rep_hh_res = functions.representative_household_wrapper(ModelPar=self.ModelPar)
+        self.rep_hh_res = rep_hh_res
+
     def solve_firm_side(self, w, r):
-        '''
+        """
         Computes the firm-side equilibrium analytically given w and r.
         Sets self.I and self.s.
-        '''
-        I, _, s     = functions.solve_firm_side_one_good(w=w, r=r, ModelPar=self.ModelPar)
+
+        Parameters
+        ----------
+        w : float
+            Low-skilled wages
+        r : float
+            Interest rate
+        """
+        
+        I, Ω, s     = functions.solve_firm_side(w=w, r=r, ModelPar=self.ModelPar)
         self.I: float = I
         self.s: float = s
 
+    def _inner_loop_trial(self, w, r):
+        """
+        Evaluates the L-market clearing residual at candidate w. Logs the trial.
+        """
+
+        self._inner_eval_count += 1
+        residual = functions.inner_loop_residual(w        = w, 
+                                                 r        = r, 
+                                                 H        = self.H, 
+                                                 L        = self.L,
+                                                 ModelPar = self.ModelPar)
+        self._log_inner_trial(w=w, residual=residual)
+        return residual
+
+    def inner_loop_solver(self, r):
+        """
+        Finds w that clears the L-market for a given r.
+
+        Bracket depends on t_form:
+          quadratic:   w ∈ (w*, w*β)       — I ∈ ((1/β)^(1/θ), 1)
+          exponential: w ∈ (w*β, w*β·e^θ)  — I ∈ (0, 1)
+
+        Uses brentq after verifying a sign change at the bracket endpoints.
+        Raises NoEquilibriumError if no root exists in the bracket.
+
+        Sets self.w, self.I, self.s, self.Y on success.
+
+        Parameters
+        ----------
+        r : float
+            Interest rate
+        """
+
+        self._inner_eval_count = 0
+
+        if self.ModelPar.t_form == 'exponential':
+            w_lb: float = self.ModelPar.w_star * self.ModelPar.β
+            w_ub: float = self.ModelPar.w_star * self.ModelPar.β * np.exp(self.ModelPar.θ)
+        else:  # 'quadratic'
+            w_lb: float = self.ModelPar.w_star
+            w_ub: float = self.ModelPar.w_star * self.ModelPar.β
+
+        obj_func = lambda w: self._inner_loop_trial(w, r)
+
+        f_lb: float = obj_func(w_lb + 1e-10)
+        f_ub: float = obj_func(w_ub - 1e-10)
+
+        print(f"  Bracket check: f(w_lb)={f_lb:+.4e}, f(w_ub)={f_ub:+.4e}")
+
+        if f_lb * f_ub > 0:
+            raise NoEquilibriumError(f"No L-market clearing w for r={r:.4f}. "\
+                                     f"Residual signs: f(w_lb)={f_lb:+.4e}, f(w_ub)={f_ub:+.4e}")
+
+        w_sol: float = brentq(obj_func, w_lb + 1e-10, w_ub - 1e-10, xtol=self.CalibPar.inner_loop_eps)
+
+        I_sol, Ω_sol, s_sol = functions.solve_firm_side(w=w_sol, r=r, ModelPar=self.ModelPar)
+        Y_sol               = s_sol * self.H / self.ModelPar.α
+
+        self.w = w_sol
+        self.I = I_sol
+        self.s = s_sol
+        self.Y = Y_sol
+
+        self._inner_w_residual = abs(functions.inner_loop_residual(w        = w_sol, 
+                                                                   r        = r, 
+                                                                   H        = self.H, 
+                                                                   L        = self.L, 
+                                                                   ModelPar = self.ModelPar))
+
+        print(f"  Inner loop solved: w={self.w:.4f}, I={self.I:.4f}, s={self.s:.4f}, "
+              f"Y={self.Y:.4f}, |resid|={self._inner_w_residual:.2e}")
+    
     def solve_household_side(self, r):
-        '''
-        Runs VFI with current (self.w, self.s, r) to obtain the stationary asset
-        distribution. Sets self.mod_res.
-        '''
+        """
+        Runs VFI with current prices (self.w, self.s, r) to obtain the stationary asset distribution. 
+        
+        Sets self.mod_res.
+
+        Parameters
+        ----------
+        r : float
+            Interest rate
+        """
+
         z_grid, trans_z     = functions.rouwenhorst_trans_matrix(ModelPar=self.ModelPar,
-                                                                  CalibPar=self.CalibPar)
-        trans_f: np.ndarray = functions.create_LH_skill_mat(ModelPar=self.ModelPar)
-        joint_trans         = np.kron(trans_f, trans_z)
-        state_grid          = [(f, z) for f in ['L', 'H'] for z in z_grid]
+                                                                 CalibPar=self.CalibPar)
+        trans_f    : np.ndarray = functions.create_LH_skill_mat(ModelPar=self.ModelPar)
+        joint_trans: np.ndarray = np.kron(trans_f, trans_z)
+        state_grid : list       = [(f, z) for f in ['L', 'H'] for z in z_grid]
 
         pol_func, pol_idx, a_grid, utility, V_arr, vfi_iters = functions.model_vfi(
             w               = self.w,
@@ -198,7 +304,6 @@ class GeneralEquilibriumModel:
         self._last_vfi_iters = vfi_iters
 
         stat_dist: pd.DataFrame = functions.calculate_stationary_distribution_endog(
-            pol_func    = pol_func,
             pol_idx     = pol_idx,
             state_grid  = state_grid,
             a_grid      = a_grid,
@@ -211,73 +316,20 @@ class GeneralEquilibriumModel:
             df_val_func = utility,
             ModelPar    = self.ModelPar)
 
-    def solve_representative_household(self):
-        rep_hh_res = functions.representative_household_wrapper(ModelPar=self.ModelPar)
-        self.rep_hh_res = rep_hh_res
-
-    def _inner_loop_trial(self, w, r):
-        '''Evaluates the L-market clearing residual at candidate w. Logs the trial.'''
-        self._inner_eval_count += 1
-        residual = functions.inner_loop_residual(w=w, r=r, H=self.H, L=self.L,
-                                                 ModelPar=self.ModelPar)
-        self._log_inner_trial(w=w, residual=residual)
-        return residual
-
-    def inner_loop_solver(self, r):
-        '''
-        Finds w ∈ (w*, w*β) that clears the L-market for a given r.
-
-        Uses brentq after verifying a sign change at the bracket endpoints.
-        Raises NoEquilibriumError if no root exists in the bracket.
-
-        Sets self.w, self.I, self.s, self.Y on success.
-        '''
-        self._inner_eval_count = 0
-
-        w_lb: float = self.ModelPar.w_star
-        w_ub: float = self.ModelPar.w_star * self.ModelPar.β
-
-        obj_func = lambda w: self._inner_loop_trial(w, r)
-
-        f_lb: float = obj_func(w_lb + 1e-10)
-        f_ub: float = obj_func(w_ub - 1e-10)
-
-        print(f"  Bracket check: f(w*)={f_lb:+.4e}, f(w*β)={f_ub:+.4e}")
-
-        if f_lb * f_ub > 0:
-            raise NoEquilibriumError(
-                f"No L-market clearing w for r={r:.4f}. "
-                f"Residual signs: f(w*)={f_lb:+.4e}, f(w*β)={f_ub:+.4e}"
-            )
-
-        w_sol: float = brentq(obj_func, w_lb + 1e-10, w_ub - 1e-10,
-                               xtol=self.CalibPar.inner_loop_eps)
-
-        I_sol, _, s_sol = functions.solve_firm_side_one_good(w_sol, r, self.ModelPar)
-        Y_sol           = s_sol * self.H / self.ModelPar.α
-
-        self.w = w_sol
-        self.I = I_sol
-        self.s = s_sol
-        self.Y = Y_sol
-
-        self._inner_w_residual = abs(functions.inner_loop_residual(
-            w_sol, r, self.H, self.L, self.ModelPar))
-
-        print(f"  Inner loop solved: w={self.w:.4f}, I={self.I:.4f}, s={self.s:.4f}, "
-              f"Y={self.Y:.4f}, |resid|={self._inner_w_residual:.2e}")
-
     def outer_solution_wrapper(self, r):
-        '''
+        """
+        Wrapper for capital market clearing given r.
+
         For a given r:
           1. Find w analytically (inner loop, no VFI).
           2. Run VFI with (w, s, r) to get stationary asset distribution.
           3. Check K market clearing: K_supply vs γ·Y/r.
-        '''
+        """
+
         self._outer_eval_count += 1
         self._inner_eval_count  = 0
 
-        if self._log_dir is not None:
+        if self._log_dir is not None and self._log_inner:
             inner_log_name          = f'inner_r{self._outer_eval_count:03d}_r{r:.6f}.log'
             self._current_inner_log = os.path.join(self._log_dir, inner_log_name)
             SEP = '-' * 60
@@ -285,11 +337,13 @@ class GeneralEquilibriumModel:
                 f.write(f"Run: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  |  r = {r:.6f}\n")
                 f.write(f"{SEP}\n")
                 f.write(f"{'trial':>7}  {'w':>12}  {'L_resid':>14}\n")
+        else:
+            self._current_inner_log = None
 
         print(f"\nTrying r={r:.4f}.")
         step_start = time.time()
 
-        # Step 1 — inner loop (analytical, no VFI)
+        # Step 1: inner loop (analytical, no VFI)
         try:
             self.inner_loop_solver(r=r)
         except NoEquilibriumError as e:
@@ -298,11 +352,11 @@ class GeneralEquilibriumModel:
                                  total_elapsed=time.time()-step_start)
             return 1e10
 
-        # Step 2 — VFI (runs once per outer iteration)
+        # Step 2: VFI (runs once per outer iteration)
         print(f"  Running VFI for r={r:.4f}, w={self.w:.4f}, s={self.s:.4f} ...")
         self.solve_household_side(r=r)
 
-        # Step 3 — K market clearing residual
+        # Step 3: K market clearing residual
         residual = functions.outer_loop_residual(
             r        = r,
             Y        = self.Y,
@@ -316,6 +370,11 @@ class GeneralEquilibriumModel:
         return abs(residual)
 
     def outer_loop_solver(self):
+        """
+        Wrapper to solve the full model. 
+        
+        Sets self.r and self.outer_res
+        """
 
         self._init_logging()
         run_start = time.time()
