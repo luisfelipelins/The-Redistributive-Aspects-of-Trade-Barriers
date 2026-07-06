@@ -7,32 +7,13 @@ Created on Mon Mar  27 21:15:31 2026
 
 import numpy as np
 from datetime import datetime
-from scipy.optimize import differential_evolution, direct, dual_annealing
+from scipy.optimize import differential_evolution, direct, dual_annealing, minimize
 from GeneralEquilibriumModel import TypeModelParameters, TypeCalibParameters, GeneralEquilibriumModel
 from config import LOG_GMM
 
 MOMENT_NAMES  = ['high_skill_share', 'skill_premium', 'w_to_wstar', 'I']
 
 SEP = '-' * 65
-
-
-def _make_calib_params():
-    return TypeCalibParameters(
-        rh_N             = 9    ,
-        rh_r             = 2    ,
-        rh_c             = 0    ,
-        vfi_lb           = 0    ,
-        vfi_ubmul        = 15   ,
-        vfi_N            = 500  ,
-        vfi_eps          = 1e-5 ,
-        vfi_howard_steps = 20   ,
-        gmc_eps          = 1e-3 ,
-        kmc_eps          = 1e-3 ,
-        r_init_guess     = 0.03 ,
-        inner_loop_eps   = 1e-5 ,
-        outer_loop_eps   = 1e-5 ,
-        outer_loop_r_lb  = 0.001,
-    )
 
 
 def _write_eval_log(eval_dir, params, g, obj, data_moments):
@@ -78,26 +59,26 @@ def _write_final_log(gmm_run_dir, params, g, obj, success, data_moments):
         f.write(f"Objective: {obj:.8e}\n")
 
 
-def gmm_model_moments(params, CalibPar, data_moments, eval_dir):
+def gmm_model_moments(params, ModelPar, CalibPar, data_moments, log_dir, log_summary_name, t_form='exponential'):
     α, ws, θ, β = params
 
-    ModelPar = TypeModelParameters(
+    modpar = TypeModelParameters(
         α      = α       ,
-        γ      = 0.28     ,
+        γ      = ModelPar.γ    ,
         β      = β       ,
         w_star = ws      ,
         θ      = θ       ,
-        σ      = 2.000   ,
-        δ      = 0.960   ,
-        ρ      = 0.950   ,
-        σ_ϵ    = 0.210   ,
-        π_LL   = 0.90    ,
-        π_HH   = 0.88    ,
-        M      = 1.000   ,
+        σ      = ModelPar.σ   ,
+        δ      = ModelPar.δ   ,
+        ρ      = ModelPar.ρ   ,
+        σ_ϵ    = ModelPar.σ_ϵ   ,
+        π_LL   = ModelPar.π_LL    ,
+        π_HH   = ModelPar.π_HH    ,
+        M      = ModelPar.M   ,
+        t_form = t_form  ,
     )
 
-    eval_dir.mkdir(exist_ok=True)
-    model = GeneralEquilibriumModel(ModelPar, CalibPar, log_dir=eval_dir)
+    model = GeneralEquilibriumModel(modpar, CalibPar, log_dir=log_dir, log_inner=False, log_summary_name=log_summary_name)
     model.outer_loop_solver()
     moments = model.economy_statistics()
 
@@ -116,16 +97,22 @@ def gmm_model_moments(params, CalibPar, data_moments, eval_dir):
     return (moments_vec - data_vec) / data_vec
 
 
-def gmm_objective(params, CalibPar, data_moments, W, eval_dir):
-    g   = gmm_model_moments(params=params, CalibPar=CalibPar, data_moments=data_moments, eval_dir=eval_dir)
+def gmm_objective(params, ModelPar, CalibPar, data_moments, W, log_dir, log_summary_name='run_summary.log'):
+    g   = gmm_model_moments(params=params, ModelPar=ModelPar, CalibPar=CalibPar, data_moments=data_moments, log_dir=log_dir, log_summary_name=log_summary_name)
     obj = float(g @ W @ g)
     return obj
 
 
-def run_gmm(CalibPar, data_moments, W, bounds, algorithm='differential_evolution'):
-    _valid = ('differential_evolution', 'crs', 'simulated_annealing')
+def run_gmm(ModelPar, CalibPar, data_moments, W, bounds=None, x0=None, algorithm='differential_evolution', t_form='quadratic'):
+    _bounds_based = ('differential_evolution', 'crs', 'simulated_annealing')
+    _point_based  = ('nelder_mead', 'powell')
+    _valid = _bounds_based + _point_based
     if algorithm not in _valid:
         raise ValueError(f"Unknown algorithm: '{algorithm}'. Choose from: {_valid}.")
+    if algorithm in _bounds_based and bounds is None:
+        raise ValueError(f"Algorithm '{algorithm}' requires 'bounds'.")
+    if algorithm in _point_based and x0 is None:
+        raise ValueError(f"Algorithm '{algorithm}' requires 'x0'.")
 
     timestamp   = datetime.now().strftime('%Y%m%d_%H%M%S')
     gmm_run_dir = LOG_GMM / f'gmm_run_{timestamp}'
@@ -147,9 +134,14 @@ def run_gmm(CalibPar, data_moments, W, bounds, algorithm='differential_evolution
         for name, w in zip(MOMENT_NAMES, w_diag):
             f.write(f"  {name:<22}: {w}\n")
         f.write(f"{SEP}\n")
-        f.write(f"Bounds:\n")
-        for name, (lb, ub) in zip(param_names, bounds):
-            f.write(f"  {name:<6}: [{lb}, {ub}]\n")
+        if bounds is not None:
+            f.write(f"Bounds:\n")
+            for name, (lb, ub) in zip(param_names, bounds):
+                f.write(f"  {name:<6}: [{lb}, {ub}]\n")
+        else:
+            f.write(f"Initial point (x0):\n")
+            for name, val in zip(param_names, x0):
+                f.write(f"  {name:<6}: {val}\n")
         f.write(f"{SEP}\n")
         f.write(f"{'eval':>6}  {'α':>8}  {'θ':>8}  {'β':>8}  {'w_star':>8}  {'obj':>14}\n")
 
@@ -158,11 +150,12 @@ def run_gmm(CalibPar, data_moments, W, bounds, algorithm='differential_evolution
 
     def objective_wrapper(params):
         eval_counter[0] += 1
-        n        = eval_counter[0]
-        eval_dir = gmm_run_dir / f'eval_{n:05d}'
+        n = eval_counter[0]
 
         try:
-            g   = gmm_model_moments(params=params, CalibPar=CalibPar, data_moments=data_moments, eval_dir=eval_dir)
+            g   = gmm_model_moments(params=params, ModelPar=ModelPar, CalibPar=CalibPar, data_moments=data_moments,
+                                    log_dir=gmm_run_dir, log_summary_name=f'run_summary_{n:05d}.log',
+                                    t_form=t_form)
             obj = float(g @ W @ g)
 
             if obj < best['obj']:
@@ -170,7 +163,6 @@ def run_gmm(CalibPar, data_moments, W, bounds, algorithm='differential_evolution
                 best['g']      = g.copy()
                 best['params'] = params.copy()
 
-            _write_eval_log(eval_dir, params, g, obj, data_moments)
             _append_run_log(run_log_path, n, params, obj)
 
         except Exception:
@@ -183,12 +175,12 @@ def run_gmm(CalibPar, data_moments, W, bounds, algorithm='differential_evolution
         result = differential_evolution(objective_wrapper,
                                         bounds  = bounds,
                                         popsize = 15,
-                                        maxiter = 200,
+                                        maxiter = 1000,
                                         tol     = 0,
                                         atol    = 1e-6,
                                         seed    = 13051905,
                                         disp    = True,
-                                        polish  = False,
+                                        polish  = True,
                                         workers = 1)
     elif algorithm == 'crs':
         result = direct(objective_wrapper,
@@ -196,12 +188,22 @@ def run_gmm(CalibPar, data_moments, W, bounds, algorithm='differential_evolution
                         maxfun         = 15_000,
                         eps            = 1e-4,
                         locally_biased = False)
-    else:  # simulated_annealing
+    elif algorithm == 'simulated_annealing':
         result = dual_annealing(objective_wrapper,
                                 bounds  = bounds,
                                 maxiter = 10_000,
                                 maxfun  = 15_000,
                                 seed    = 13051905)
+    elif algorithm == 'nelder_mead':
+        result = minimize(objective_wrapper,
+                          x0      = x0,
+                          method  = 'Nelder-Mead',
+                          options = dict(maxiter=10_000, maxfev=15_000, xatol=1e-6, fatol=1e-8, disp=True))
+    else:  # powell
+        result = minimize(objective_wrapper,
+                          x0      = x0,
+                          method  = 'Powell',
+                          options = dict(maxiter=10_000, maxfev=15_000, xtol=1e-6, ftol=1e-8, disp=True))
 
     if best['params'] is not None:
         _write_final_log(gmm_run_dir, best['params'], best['g'], best['obj'], result.success, data_moments)
@@ -209,5 +211,5 @@ def run_gmm(CalibPar, data_moments, W, bounds, algorithm='differential_evolution
         with open(gmm_run_dir / 'gmm_final_res.log', 'w', encoding='utf-8') as f:
             f.write("GMM Final Result: all evaluations failed — no valid solution found.\n")
 
-    return result
+    return result, best
 
