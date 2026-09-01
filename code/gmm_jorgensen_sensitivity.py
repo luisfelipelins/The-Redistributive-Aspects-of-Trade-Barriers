@@ -20,7 +20,7 @@ CalibPar = TypeCalibParameters(
         rh_r             = 2    ,
         rh_c             = 0    ,
         vfi_lb           = 0    ,
-        vfi_ubmul        = 15   ,
+        vfi_ubmul        = 60   ,
         vfi_N            = 500  ,
         vfi_eps          = 1e-5 ,
         vfi_howard_steps = 20   ,
@@ -61,7 +61,7 @@ moment_names = ['high_skill_share', 'w_to_wstar', 'I', 'skill_premium']
 log_dir = LOG_GMM / 'jacobian'
 log_dir.mkdir(exist_ok=True)
 
-h = 1e-9
+h = 1e-7
 
 #############################################################################################
 ### --- Jorgensen (2023) Sensitivity of Estimated Parameters to Calibrated Parameters --- ###
@@ -138,48 +138,42 @@ plt.savefig(OUTPUTS_GMM / 'jorgensenelasticity.pdf')
 plt.close()
 
 ######################################################################
-### --- Checking narrative-hold regions given sensitivity of δ --- ###
+### --- Checking narrative-hold regions given sensitivity of γ --- ###
 ######################################################################
 
-delta_base      = p['δ']
-delta_scenarios = {'δ=0.94': 0.94, 'δ=0.96': 0.96}
-idx_delta       = gamma_names.index('δ')
-s_delta         = S_hat[:, idx_delta]
+gamma_p_base = p['γ']
+idx_gamma_p  = gamma_names.index('γ')
 
 theta_grid = np.linspace(0.5, 27, 600)
 I_grid     = np.linspace(0.01, 0.99, 600)
 tt, ii     = np.meshgrid(theta_grid, I_grid)
 G_grid     = 1 / (tt * (1 - ii)) + 1 / (1 - np.exp(-tt * ii))
 
-gamma_val = p['γ']
 idx_alpha = param_names.index('α')
 idx_theta = param_names.index('θ')
 
-delta_plot_scenarios = [
-    ('δ=0.95 (base)', delta_base, 'tab:blue',   '-',  '-'),
-    ('δ=0.94',        0.94,       'tab:orange',  '--', ':'),
-    ('δ=0.96',        0.96,       'tab:green',   '--', ':'),
+gamma_plot_scenarios = [
+    (f'γ={gamma_p_base:.2f} (base)', gamma_p_base, 'tab:blue',   '-',  '-'),
+    ('γ=0.35',                       0.35,         'tab:orange', '--', ':'),
+    ('γ=0.37',                       0.37,         'tab:green',  '--', ':'),
 ]
 
 fig, ax = plt.subplots(figsize=(6,6))
 legend_elements = []
 
-for label, delta_val, color, ls_contour, ls_vline in delta_plot_scenarios:
-    dd     = delta_val - delta_base
-    alpha  = theta_values[idx_alpha] + S_hat[idx_alpha, idx_delta] * dd
-    theta  = theta_values[idx_theta] + S_hat[idx_theta, idx_delta] * dd
-    thr    = (1 - gamma_val) / alpha
+for label, gamma_p_val, color, ls_contour, ls_vline in gamma_plot_scenarios:
+    dg     = gamma_p_val - gamma_p_base
+    alpha  = theta_values[idx_alpha] + S_hat[idx_alpha, idx_gamma_p] * dg
+    theta  = theta_values[idx_theta] + S_hat[idx_theta, idx_gamma_p] * dg
+    thr    = (1 - gamma_p_val) / alpha
 
     ax.contour(theta_grid, I_grid, G_grid, levels=[thr],
                colors=[color], linewidths=2, linestyles=[ls_contour])
     ax.axvline(theta, color=color, ls=ls_vline, lw=1.2)
 
-    legend_elements.append(Line2D([0], [0], color=color, lw=2, ls=ls_contour,
-        label=f'{label}: (1−γ)/α={thr:.3f}'))
-    legend_elements.append(Line2D([0], [0], color=color, lw=1.2, ls=ls_vline,
-        label=f'{label}: θ̂={theta:.4f}'))
+    legend_elements.append(Line2D([0], [0], color=color, lw=2, ls=ls_contour, label=label))
 
-ax.annotate(r'$\hat{w}/\hat{\beta} > 0$', xy=(2, 0.8), fontsize=10, color='gray', ha='center')
+ax.annotate(r'$\hat{w}/\hat{\beta} > 0$', xy=(5, 0.9), fontsize=10, color='gray', ha='center')
 ax.annotate(r'$\hat{w}/\hat{\beta} < 0$', xy=(14,  0.5), fontsize=10, color='gray', ha='center')
 ax.set_xlabel(r'$\theta$', fontsize=14)
 ax.set_ylabel(r'$I$', fontsize=14)
@@ -188,4 +182,38 @@ ax.legend(handles=legend_elements, fontsize=10, loc='upper right')
 ax.grid(linestyle='--', alpha=0.4)
 plt.tight_layout()
 plt.savefig(OUTPUTS_GMM / 'sensboundaries.pdf')
+plt.close()
+
+###############################################################
+### --- Narrative-hold region, baseline model only --- ###
+###############################################################
+
+label, gamma_p_val, color, ls_contour, ls_vline = gamma_plot_scenarios[0]
+
+fig, ax = plt.subplots(figsize=(6,6))
+legend_elements = []
+
+dg     = gamma_p_val - gamma_p_base
+alpha  = theta_values[idx_alpha] + S_hat[idx_alpha, idx_gamma_p] * dg
+theta  = theta_values[idx_theta] + S_hat[idx_theta, idx_gamma_p] * dg
+thr    = (1 - gamma_p_val) / alpha
+
+ax.contour(theta_grid, I_grid, G_grid, levels=[thr],
+           colors=['darkblue'], linewidths=2, linestyles=[ls_contour])
+ax.axvline(theta, color='red', ls=ls_vline, lw=1.2)
+ax.axhline(data_moments['I'], color='gray', ls='--', lw=1.2)
+
+legend_elements.append(Line2D([0], [0], color='darkblue', lw=2, ls=ls_contour, label=label))
+legend_elements.append(Line2D([0], [0], color='gray', lw=1.2, ls='--',
+    label=f"$I$ (data) = {data_moments['I']:.3f}"))
+
+ax.annotate(r'$\hat{w}/\hat{\beta} > 0$', xy=(5, 0.9), fontsize=10, color='gray', ha='center')
+ax.annotate(r'$\hat{w}/\hat{\beta} < 0$', xy=(14,  0.5), fontsize=10, color='gray', ha='center')
+ax.set_xlabel(r'$\theta$', fontsize=14)
+ax.set_ylabel(r'$I$', fontsize=14)
+ax.set_title(r'Narrative-hold region w/ representative agent', fontsize=15)
+ax.legend(handles=legend_elements, fontsize=10, loc='upper right')
+ax.grid(linestyle='--', alpha=0.4)
+plt.tight_layout()
+plt.savefig(OUTPUTS_GMM / 'sensboundaries_baseline.pdf')
 plt.close()

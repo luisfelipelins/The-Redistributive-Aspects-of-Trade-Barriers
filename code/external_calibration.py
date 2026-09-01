@@ -32,7 +32,7 @@ full_sample        = df['weight_pop'].sum()
 own_educ_int_cases = ['Less than high school','High school', 'Some college']
 persistance        = df.loc[df['ppeducat'].isin(own_educ_int_cases)]['weight_pop'].sum()
 
-π_LL = persistance/full_sample
+π_LL = (persistance/full_sample)**(1/30)
 
 cps_link = 'https://www2.census.gov/programs-surveys/demo/tables/educational-attainment/2019/cps-detailed-tables/table-2-1.xlsx' 
 data = pd.read_excel(cps_link)
@@ -115,48 +115,6 @@ data                 = pd.merge(ilc_data,tiva_data,on='Country',how='outer').set
 us                   = data.loc['United States']['Wage']
 data.drop('United States', inplace=True)
 row                  = (data['Wage'] * (data['Value Added']/data['Value Added'].sum())).sum()
-
-#####################################
-COMTRADE_KEY = "49018b796e864c25a92af3e66f5c44b4"
-
-code_to_country = {
-    490: 'Taiwan',        554: 'New Zealand',   608: 'Philippines',  702: 'Singapore',
-     36: 'Australia',      40: 'Austria',         56: 'Belgium',      124: 'Canada',
-    203: 'Czech Republic', 208: 'Denmark',        233: 'Estonia',     246: 'Finland',
-    250: 'France',        276: 'Germany',         300: 'Greece',      348: 'Hungary',
-    372: 'Ireland',       376: 'Israel',          380: 'Italy',       392: 'Japan',
-    410: 'South Korea',   484: 'Mexico',          528: 'Netherlands', 578: 'Norway',
-    616: 'Poland',        620: 'Portugal',        703: 'Slovakia',    724: 'Spain',
-    752: 'Sweden',        756: 'Switzerland',     792: 'Turkey',      826: 'United Kingdom',
-     32: 'Argentina',      76: 'Brazil',          156: 'China',       356: 'India'
-}
-
-mfg_chapters  = ','.join(str(c) for c in range(28, 98))
-partner_list  = list(code_to_country.keys())
-batch_size    = 5
-records       = []
-
-for i in range(0, len(partner_list), batch_size):
-    batch = ','.join(str(p) for p in partner_list[i:i+batch_size])
-    link  = (
-        "https://comtradeapi.un.org/data/v1/get/C/A/HS"
-        f"?reporterCode=842&partnerCode={batch}&period=2013"
-        f"&flowCode=M&cmdCode={mfg_chapters}"
-    )
-    r = requests.get(link, headers={"Ocp-Apim-Subscription-Key": COMTRADE_KEY}, timeout=60)
-    records.extend(r.json()['data'])
-
-imports_data             = pd.DataFrame(records)[['partnerCode', 'primaryValue']]
-imports_data             = imports_data.groupby('partnerCode')['primaryValue'].sum().reset_index()
-imports_data['Country']  = imports_data['partnerCode'].map(code_to_country)
-imports_data             = imports_data[['Country', 'primaryValue']].rename(columns={'primaryValue': 'Imports'})
-
-data  = pd.merge(ilc_data, imports_data, on='Country', how='outer').set_index('Country')
-us    = data.loc['United States']['Wage']
-data.drop('United States', inplace=True)
-row   = (data['Wage'] * (data['Imports'] / data['Imports'].sum())).sum()
-
-#####################################
 
 w_to_wstar = us/row
 

@@ -583,7 +583,7 @@ def _vfi_core(V, U, joint_trans, delta, eps, howard_steps):
 
     return V, pol, it_count
 
-def model_vfi(w, s, r, income_func, state_grid, joint_trans, ModelPar, CalibPar, print_convergence=True, V_init=None):
+def model_vfi(w, s, r, income_func, state_grid, joint_trans, ModelPar, CalibPar, print_convergence=True, V_init=None, a_grid=None):
     """
     Value Function Iteration for the household problem.
 
@@ -611,6 +611,10 @@ def model_vfi(w, s, r, income_func, state_grid, joint_trans, ModelPar, CalibPar,
         Print timing and iteration count. Default True.
     V_init : numpy.ndarray or None, optional
         Warm-start initial value function.
+    a_grid : list or None, optional
+        Asset grid to solve on. When None (the default) the grid is built internally from
+        max(w, s)·vfi_ubmul, which is the steady-state behaviour. Supplying a grid keeps
+        the state space fixed across different price vectors, as the transition requires.
 
     Returns
     -------
@@ -630,9 +634,13 @@ def model_vfi(w, s, r, income_func, state_grid, joint_trans, ModelPar, CalibPar,
     """
 
     start   : float      = time.time()
-    ub      : float      = max(w, s) * CalibPar.vfi_ubmul
-    dist    : float      = (ub - CalibPar.vfi_lb) / CalibPar.vfi_N
-    a_grid  : list       = [CalibPar.vfi_lb + (i * dist) for i in range(CalibPar.vfi_N + 1)]
+    if a_grid is None:
+        ub    : float    = max(w, s) * CalibPar.vfi_ubmul
+        dist  : float    = (ub - CalibPar.vfi_lb) / CalibPar.vfi_N
+        a_grid: list     = [CalibPar.vfi_lb + (i * dist) for i in range(CalibPar.vfi_N + 1)]
+    else:
+        a_grid: list     = list(a_grid)
+
     a_arr   : np.ndarray = np.array(a_grid)
     n_assets: int        = len(a_grid)
     n_states: int        = len(state_grid)

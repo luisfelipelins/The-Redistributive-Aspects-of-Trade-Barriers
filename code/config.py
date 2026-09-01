@@ -17,10 +17,11 @@ DATA_INT           = DATA_DIR / "intermediate"
 OUTPUTS            = ROOT_DIR / "outputs"
 OUTPUTS_MOTIVATION = OUTPUTS / 'motivation'
 OUTPUTS_GMM        = OUTPUTS / 'gmm'
+OUTPUTS_QUANT_EX   = OUTPUTS / 'quant_exercises'
 LOG                = ROOT_DIR / "log"
 LOG_ISOLATED       = LOG / "isolated_runs"
 LOG_GMM            = LOG / "gmm"
 CONFIG             = ROOT_DIR / 'config'
 
-for folder in [DATA_RAW, DATA_FINAL, DATA_PARAMS, DATA_INT, OUTPUTS, OUTPUTS_MOTIVATION, OUTPUTS_GMM, LOG_ISOLATED, LOG_GMM, CONFIG]:
+for folder in [DATA_RAW, DATA_FINAL, DATA_PARAMS, DATA_INT, OUTPUTS, OUTPUTS_MOTIVATION, OUTPUTS_GMM, OUTPUTS_QUANT_EX, LOG_ISOLATED, LOG_GMM, CONFIG]:
     folder.mkdir(parents=True, exist_ok=True)

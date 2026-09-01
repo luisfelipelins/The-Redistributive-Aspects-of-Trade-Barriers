@@ -5,15 +5,33 @@ Created on Mon Mar  27 21:15:31 2026
 @author: lfval
 """
 
+import re
 import numpy as np
 from datetime import datetime
 from scipy.optimize import differential_evolution, direct, dual_annealing, minimize
+from scipy.optimize._differentialevolution import DifferentialEvolutionSolver
 from GeneralEquilibriumModel import TypeModelParameters, TypeCalibParameters, GeneralEquilibriumModel
 from config import LOG_GMM
 
 MOMENT_NAMES  = ['high_skill_share', 'skill_premium', 'w_to_wstar', 'I']
 
 SEP = '-' * 65
+
+FAIL_PENALTY = 1e10
+
+DE_SEED    = 13051905
+DE_MAXITER = 1000
+DE_KWARGS  = dict(popsize  = 15,
+                  tol      = 0,
+                  atol     = 1e-6,
+                  polish   = True,
+                  workers  = 1,
+                  init     = 'latinhypercube',
+                  updating = 'immediate')
+
+_RUNLOG_PAT  = re.compile(r'^\s*(\d+)\s+α=.*\bobj=([-\d.eE+]+)\s*$')
+_SUMMARY_PAT = re.compile(r'α=(\S+)\s+γ=\S+\s+β=(\S+)\s+w_star=(\S+)\s*\n'
+                          r'\s*θ=(\S+)\s')
 
 
 def _write_eval_log(eval_dir, params, g, obj, data_moments):
@@ -51,10 +69,13 @@ def _write_final_log(gmm_run_dir, params, g, obj, success, data_moments):
         f.write(f"  α={α:.6f}  "
                 f"  θ={θ:.6f}  β={β:.6f}  w_star={ws:.6f}\n")
         f.write(f"{SEP}\n")
-        f.write(f"Moment distances (model - data):\n")
-        for name, val in zip(MOMENT_NAMES, g):
-            model_val = data_moments[name] * (1 + val)
-            f.write(f"  {name:<22}: {val:+.6f} [{model_val:.6f}]\n")
+        if g is None:
+            f.write(f"Moment distances unavailable: best point comes from replayed history.\n")
+        else:
+            f.write(f"Moment distances (model - data):\n")
+            for name, val in zip(MOMENT_NAMES, g):
+                model_val = data_moments[name] * (1 + val)
+                f.write(f"  {name:<22}: {val:+.6f} [{model_val:.6f}]\n")
         f.write(f"{SEP}\n")
         f.write(f"Objective: {obj:.8e}\n")
 
@@ -103,7 +124,121 @@ def gmm_objective(params, ModelPar, CalibPar, data_moments, W, log_dir, log_summ
     return obj
 
 
-def run_gmm(ModelPar, CalibPar, data_moments, W, bounds=None, x0=None, algorithm='differential_evolution', t_form='quadratic'):
+def _parse_run_history(run_dir):
+    """
+    Rebuilds the evaluation history of a previous DE run from its logs.
+
+    Objectives come from gmm_run.log, which rounds them to six significant digits.
+    Parameters come from the run_summary_NNNNN.log files, which store them at full
+    precision. Evaluations logged at the failure penalty are recomputed exactly from
+    those parameters, since gmm_run.log collapses all of them to 1.000000e+10.
+
+    Returns
+    -------
+    P : ndarray, shape (n, 4)
+        Parameter vectors [α, w_star, θ, β] in evaluation order.
+    E : ndarray, shape (n,)
+        Objective values in evaluation order.
+    """
+    eval_ns, objs = [], []
+    with open(run_dir / 'gmm_run.log', 'r', encoding='utf-8') as f:
+        for line in f:
+            m = _RUNLOG_PAT.match(line)
+            if m:
+                eval_ns.append(int(m.group(1)))
+                objs.append(float(m.group(2)))
+
+    if eval_ns != list(range(1, len(eval_ns) + 1)):
+        raise ValueError(f"gmm_run.log in {run_dir} has gaps or out-of-order evaluations.")
+
+    P = np.empty((len(eval_ns), 4))
+    for i, n in enumerate(eval_ns):
+        summary = run_dir / f'run_summary_{n:05d}.log'
+        if not summary.exists():
+            raise FileNotFoundError(f"Missing {summary.name}; cannot recover parameters for evaluation {n}.")
+        m = _SUMMARY_PAT.search(summary.read_text(encoding='utf-8'))
+        if m is None:
+            raise ValueError(f"Could not parse parameters from {summary.name}.")
+        α, β, ws, θ = (float(v) for v in m.groups())
+        P[i] = [α, ws, θ, β]
+
+    E = np.asarray(objs)
+    failed    = E >= 1e9
+    E[failed] = FAIL_PENALTY + np.sum(np.square(P[failed]), axis=1)
+
+    return P, E
+
+
+def _rebuild_de_solver(func, bounds, run_dir, disp=True):
+    """
+    Restores a DifferentialEvolutionSolver to the state a previous run had reached.
+
+    The solver is deterministic given DE_SEED: its path depends only on the initial
+    latin-hypercube population and on the accept/reject decisions, which are driven by
+    the objective values. Replaying the recorded objectives in evaluation order therefore
+    reproduces the population, the energies and the RNG state exactly, without solving the
+    model once. Every trial the solver generates is checked against the recorded parameters,
+    so any divergence is caught at the evaluation where it happens rather than silently
+    continuing from a wrong state.
+
+    A trailing partial generation in the log is discarded — the replay only advances in
+    whole generations.
+
+    Returns
+    -------
+    solver : DifferentialEvolutionSolver
+        Restored to the end of the last complete generation.
+    n_evals : int
+        Number of evaluations consumed by the replay.
+    n_gen : int
+        Number of complete generations replayed after the initial population.
+    """
+    P, E = _parse_run_history(run_dir)
+
+    solver = DifferentialEvolutionSolver(func, bounds, rng=DE_SEED, maxiter=DE_MAXITER,
+                                         disp=disp, **DE_KWARGS)
+
+    pop_size = solver.num_population_members
+    n_gen    = (len(E) - pop_size) // pop_size
+    if n_gen < 0:
+        raise ValueError(f"{run_dir.name} holds {len(E)} evaluations, fewer than the "
+                         f"{pop_size} needed for the initial population.")
+    n_evals = pop_size * (1 + n_gen)
+
+    cursor = [0]
+
+    def replay(x):
+        i = cursor[0]
+        cursor[0] += 1
+        drift = np.abs(np.asarray(x) - P[i]).max()
+        if drift > 1e-9:
+            raise ValueError(f"Replay diverged from {run_dir.name} at evaluation {i + 1}: "
+                             f"generated parameters differ by {drift:.3e}.")
+        return E[i]
+
+    real_func   = solver.func
+    solver.func = replay
+    try:
+        solver.feasible, solver.constraint_violation = (
+            solver._calculate_population_feasibilities(solver.population))
+        solver.population_energies[solver.feasible] = (
+            solver._calculate_population_energies(solver.population[solver.feasible]))
+        solver._promote_lowest_energy()
+
+        for _ in range(n_gen):
+            next(solver)
+    finally:
+        solver.func = real_func
+
+    if cursor[0] != n_evals:
+        raise ValueError(f"Replay consumed {cursor[0]} evaluations, expected {n_evals}.")
+
+    solver._nfev = n_evals
+
+    return solver, n_evals, n_gen
+
+
+def run_gmm(ModelPar, CalibPar, data_moments, W, bounds=None, x0=None, algorithm='differential_evolution', t_form='quadratic', resume_from=None):
     _bounds_based = ('differential_evolution', 'crs', 'simulated_annealing')
     _point_based  = ('nelder_mead', 'powell')
     _valid = _bounds_based + _point_based
@@ -113,15 +248,22 @@ def run_gmm(ModelPar, CalibPar, data_moments, W, bounds=None, x0=None, algorithm
         raise ValueError(f"Algorithm '{algorithm}' requires 'bounds'.")
     if algorithm in _point_based and x0 is None:
         raise ValueError(f"Algorithm '{algorithm}' requires 'x0'.")
+    if resume_from is not None and algorithm != 'differential_evolution':
+        raise ValueError(f"'resume_from' is only supported for differential_evolution, got '{algorithm}'.")
 
-    timestamp   = datetime.now().strftime('%Y%m%d_%H%M%S')
-    gmm_run_dir = LOG_GMM / f'gmm_run_{timestamp}'
-    gmm_run_dir.mkdir()
+    if resume_from is not None:
+        gmm_run_dir = LOG_GMM / resume_from if isinstance(resume_from, str) else resume_from
+        if not (gmm_run_dir / 'gmm_run.log').exists():
+            raise FileNotFoundError(f"No gmm_run.log in {gmm_run_dir}; nothing to resume from.")
+    else:
+        timestamp   = datetime.now().strftime('%Y%m%d_%H%M%S')
+        gmm_run_dir = LOG_GMM / f'gmm_run_{timestamp}'
+        gmm_run_dir.mkdir()
 
     param_names = ['α', 'w_star', 'θ', 'β']
 
     run_log_path = gmm_run_dir / 'gmm_run.log'
-    with open(run_log_path, 'w', encoding='utf-8') as f:
+    with open(run_log_path, 'a' if resume_from is not None else 'w', encoding='utf-8') as f:
         f.write(f"GMM Run  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"Algorithm: {algorithm}\n")
         f.write(f"{SEP}\n")
@@ -152,6 +294,10 @@ def run_gmm(ModelPar, CalibPar, data_moments, W, bounds=None, x0=None, algorithm
         eval_counter[0] += 1
         n = eval_counter[0]
 
+        _, _, _, β = params
+        # if β < 1.0:
+        #     return 1e8 + 1e6 * (1.0 - β) ** 2 <<<<---- TEMPORARY, REMOVE LATER
+
         try:
             g   = gmm_model_moments(params=params, ModelPar=ModelPar, CalibPar=CalibPar, data_moments=data_moments,
                                     log_dir=gmm_run_dir, log_summary_name=f'run_summary_{n:05d}.log',
@@ -166,22 +312,37 @@ def run_gmm(ModelPar, CalibPar, data_moments, W, bounds=None, x0=None, algorithm
             _append_run_log(run_log_path, n, params, obj)
 
         except Exception:
-            obj = 1e10 + float(np.sum(np.square(params)))
+            obj = FAIL_PENALTY + float(np.sum(np.square(params)))
             _append_run_log(run_log_path, n, params, obj)
 
         return obj
 
-    if algorithm == 'differential_evolution':
+    if algorithm == 'differential_evolution' and resume_from is not None:
+        print(f"Rebuilding solver state from {gmm_run_dir.name} ...")
+        solver, n_evals, n_gen = _rebuild_de_solver(objective_wrapper, bounds, gmm_run_dir)
+        eval_counter[0] = n_evals
+
+        remaining = DE_MAXITER - n_gen
+        if remaining <= 0:
+            raise ValueError(f"{gmm_run_dir.name} already completed {n_gen} of {DE_MAXITER} generations.")
+        solver.maxiter = remaining
+
+        best['obj']    = float(solver.population_energies[0])
+        best['params'] = solver._scale_parameters(solver.population[0])
+
+        print(f"Replayed {n_evals} evaluations over {n_gen} generations. "
+              f"Best objective so far: {best['obj']:.8e}")
+        print(f"Resuming for up to {remaining} further generations.\n")
+
+        result = solver.solve()
+
+    elif algorithm == 'differential_evolution':
         result = differential_evolution(objective_wrapper,
                                         bounds  = bounds,
-                                        popsize = 15,
-                                        maxiter = 1000,
-                                        tol     = 0,
-                                        atol    = 1e-6,
-                                        seed    = 13051905,
+                                        maxiter = DE_MAXITER,
+                                        seed    = DE_SEED,
                                         disp    = True,
-                                        polish  = True,
-                                        workers = 1)
+                                        **DE_KWARGS)
     elif algorithm == 'crs':
         result = direct(objective_wrapper,
                         bounds         = bounds,
