@@ -18,7 +18,7 @@ CalibPar = TypeCalibParameters(
         rh_r             = 2    ,
         rh_c             = 0    ,
         vfi_lb           = 0    ,
-        vfi_ubmul        = 15   ,
+        vfi_ubmul        = 60   ,
         vfi_N            = 500  ,
         vfi_eps          = 1e-5 ,
         vfi_howard_steps = 20   ,
@@ -51,7 +51,7 @@ data_moments = {
     'I'               : pre_gmm_params['moments']['I']}
 
 W      = np.diag([1.0, 1.0, 1.0, 1.0])
-bounds = [(0.1, 0.55), (0.05, 0.7), (1e-6, 99), (1e-6, 7.0)]  # α, w_star, θ, β
+bounds = [(0.1, 0.55), (0.05, 0.7), (1e-6, 40), (1.0, 7.0)]  # α, w_star, θ, β
 
 # --- Stage 1: Differential Evolution ---
 print(f"\n{'='*65}")
@@ -64,14 +64,6 @@ _, best_de = run_gmm(ModelPar=ModelPar, CalibPar=CalibPar, data_moments=data_mom
 x0 = best_de['params'].tolist()
 
 all_bests = {'differential_evolution': best_de}
-
-for algo in ['nelder_mead', 'powell']:
-    print(f"\n{'='*65}")
-    print(f"  Starting GMM estimation — algorithm: {algo}")
-    print(f"{'='*65}\n")
-    _, best = run_gmm(ModelPar=ModelPar, CalibPar=CalibPar, data_moments=data_moments, W=W,
-                      x0=x0, algorithm=algo, t_form='exponential')
-    all_bests[algo] = best
 
 # --- Select winner and save ---
 best_algo    = min(all_bests, key=lambda k: all_bests[k]['obj'])

@@ -11,7 +11,6 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
-from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
 import requests
 import io
 
@@ -22,6 +21,17 @@ fred = Fred(api_key=fred_api)
 ### --- Slides Facts --- ###
 ############################
 
+# Gini Index (FRED-BLS)
+gini  = fred.get_series('SIPOVGINIUSA').loc['1979-01-01':]
+
+fig,ax=plt.subplots(ncols=1,figsize=(9,5))
+ax.plot(gini,color='black',marker='o')
+ax.grid(linestyle='--')
+ax.set_title('Income Inequality in the US (Source: WB, FRED)',fontweight='bold',loc='left')
+ax.set_ylabel('Income Gini Index')
+plt.tight_layout()
+plt.savefig(OUTPUTS_MOTIVATION / 'motivation_gini_index.pdf')
+plt.close()
 
 # Real Wage (FRED-BLS)
 mfg_wage  = fred.get_series('CES3000000008').loc['1979-01-01':]
@@ -152,8 +162,8 @@ for i in range(len(emp['prod'].dropna().index)):
 emp = emp.dropna().resample('Q').mean()/1000
 
 fig,ax=plt.subplots(ncols=1,figsize=(9,5))
-ax.plot(emp['emp'].rolling(4).mean()   ,color='darkgreen',label='Actual')
-ax.plot(emp['emp_cf'].rolling(4).mean(),color='darkblue',label='Counterfactual')
+ax.plot(emp['emp'].rolling(4).mean()   ,color='darkgreen',label=r'Actual Employment')
+ax.plot(emp['emp_cf'].rolling(4).mean(),color='darkblue',label=r'Counterfactual with Fixed Plants')
 ax.grid(linestyle='--')
 ax.set_title('Manufacturing Employment Levels (4Q Rolling Avg., Source: BLS/FRED)',fontweight='bold',loc='left')
 ax.set_ylabel('Millions of Persons')
@@ -296,8 +306,8 @@ emp = emp.dropna().resample('Q').mean()/1000
 
 fig,ax=plt.subplots(ncols=2,figsize=(12,5),gridspec_kw={'width_ratios': [1.2,1]})
 
-ax[0].plot(emp['emp'].rolling(4).mean()   ,color='darkgreen',label='Actual')
-ax[0].plot(emp['emp_cf'].rolling(4).mean(),color='darkblue',label='Counterfactual')
+ax[0].plot(emp['emp'].rolling(4).mean()   ,color='darkgreen',label=r'Actual Employment')
+ax[0].plot(emp['emp_cf'].rolling(4).mean(),color='darkblue',label=r'Counterfactual with Fixed Plants')
 ax[0].grid(linestyle='--')
 ax[0].set_ylabel('Millions of Persons',fontsize=11)
 ax[0].legend(loc=0,fontsize=11)
@@ -392,11 +402,7 @@ plt.savefig(OUTPUTS_MOTIVATION / 'motivation_fact2.pdf')
 plt.close()
 
 # Fact 3: Real wages and income inequality
-fig = plt.figure(figsize=(12, 5))
-outer = GridSpec(1, 2, figure=fig, width_ratios=[1, 1], wspace=0.35)
-ax0   = fig.add_subplot(outer[0])
-inner = GridSpecFromSubplotSpec(3, 1, subplot_spec=outer[1], hspace=0.5)
-ax1, ax2, ax3 = [fig.add_subplot(inner[i]) for i in range(3)]
+fig, (ax0, ax1) = plt.subplots(ncols=2, figsize=(12, 5))
 
 ax0.axhline(100, color='black')
 ax0.plot(mfg_wage, color='darkgreen', label='Manufacturing')
@@ -408,36 +414,11 @@ ax0.set_ylabel('Index (Jan/1979 = 100)', fontsize=11)
 ax0.legend(loc=0, fontsize=11)
 ax0.tick_params(labelsize=11)
 
-ax1.barh([f"1st QU (100%)",
-          f"3rd QU (100%)",
-          f"5th QU (100%)"],
-         growth_rates['Total ex-Social Security'], color='darkgreen')
-ax1.set_axisbelow(True)
-ax1.set_title('Real Income Growth (ex-Soc. Sec.)', fontweight='bold')
+ax1.plot(gini, color='black', marker='o')
 ax1.grid(linestyle='--')
-ax1.xaxis.set_major_formatter(mtick.PercentFormatter(1))
+ax1.set_title('Income Inequality in the US (WB, FRED)', fontweight='bold')
+ax1.set_ylabel('Income Gini Index', fontsize=11)
 ax1.tick_params(labelsize=11)
-
-ax2.barh([f"1st QU ({round(d2024_pct['Wages']['p1']*100,1)}%)",
-          f"3rd QU ({round(d2024_pct['Wages']['p3']*100,1)}%)",
-          f"5th QU ({round(d2024_pct['Wages']['p5']*100,1)}%)"],
-         growth_rates['Wages'], color='darkgreen')
-ax2.set_axisbelow(True)
-ax2.set_title('Wages', fontweight='bold')
-ax2.grid(linestyle='--')
-ax2.xaxis.set_major_formatter(mtick.PercentFormatter(1))
-ax2.tick_params(labelsize=11)
-
-ax3.barh([f"1st QU ({round(d2024_pct['Capital']['p1']*100,1)}%)",
-          f"3rd QU ({round(d2024_pct['Capital']['p3']*100,1)}%)",
-          f"5th QU ({round(d2024_pct['Capital']['p5']*100,1)}%)"],
-         growth_rates['Capital'], color='darkgreen')
-ax3.set_axisbelow(True)
-ax3.set_title('Capital Income', fontweight='bold')
-ax3.grid(linestyle='--')
-ax3.xaxis.set_major_formatter(mtick.PercentFormatter(1))
-ax3.tick_params(labelsize=11)
-ax3.set_xlabel('2012–2024 Growth in Real Income by Source\n(parentheses = share of 2024 income from source)', fontsize=10)
 
 plt.tight_layout()
 plt.savefig(OUTPUTS_MOTIVATION / 'motivation_fact3.pdf', bbox_inches='tight')

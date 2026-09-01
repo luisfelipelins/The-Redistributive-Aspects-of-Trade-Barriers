@@ -461,7 +461,75 @@ class GeneralEquilibriumModel:
 
         return pd.DataFrame(rows)
 
-    def economy_statistics(self, iq_top=90, iq_bottom=10):
+    def weighted_group_table(self, group_var, y_vars=('a_0', 'y', 'V', 'c', 'c_eq'), n_bins=10):
+        """
+        Density-weighted disaggregation table of mod_res by group_var.
+
+        If group_var == 'skill_type', groups households by their exact ('L','H')
+        value. Otherwise, splits households into n_bins bins of equal total
+        density (mod_res['dens']) along group_var (deciles for n_bins=10).
+
+        Reports the density-weighted mean of each variable in y_vars and the
+        total density (household mass) within each group/bin.
+
+        Parameters
+        ----------
+        group_var : str
+            Column to group on ('a_0', 'y', 'z', or 'skill_type').
+        y_vars : tuple of str
+            Columns to average within each group/bin.
+        n_bins : int
+            Number of equal-density bins when group_var is continuous.
+        """
+
+        rows: list = []
+        mres: pd.DataFrame = self.mod_res.copy()
+
+        if group_var == 'skill_type':
+            for skill in ['L', 'H']:
+                grp       : pd.DataFrame = mres.loc[mres['skill_type'] == skill]
+                dens_total: float        = grp['dens'].sum()
+
+                row: dict = {'group': skill, 'dens_total': dens_total}
+                for y_var in y_vars:
+                    row[f'{y_var}_mean'] = (grp[y_var] * grp['dens']).sum() / dens_total if dens_total > 0 else np.nan
+                rows.append(row)
+
+            return pd.DataFrame(rows)
+
+        x      : np.ndarray = np.array(mres[group_var])
+        weights: np.ndarray = np.array(mres['dens'])
+
+        sorted_idx: np.ndarray = np.argsort(x)
+        w_sorted  : np.ndarray = weights[sorted_idx]
+        y_sorted  : dict       = {y_var: np.array(mres[y_var])[sorted_idx] for y_var in y_vars}
+
+        cum_w: np.ndarray = np.cumsum(w_sorted)
+        cum_w: np.ndarray = cum_w / cum_w[-1]
+
+        for i in range(n_bins):
+            q_low : float = i / n_bins
+            q_high: float = (i + 1) / n_bins
+
+            if i == 0:
+                mask: np.ndarray = cum_w <= q_high
+            elif i == n_bins - 1:
+                mask: np.ndarray = cum_w > q_low
+            else:
+                mask: np.ndarray = (cum_w > q_low) & (cum_w <= q_high)
+
+            w_group   : np.ndarray = w_sorted[mask]
+            dens_total: float      = w_group.sum()
+
+            row: dict = {'group': i + 1, 'dens_total': dens_total}
+            for y_var in y_vars:
+                y_group: np.ndarray = y_sorted[y_var][mask]
+                row[f'{y_var}_mean'] = np.sum(y_group * w_group) / dens_total if dens_total > 0 else np.nan
+            rows.append(row)
+
+        return pd.DataFrame(rows)
+
+    def economy_statistics(self, iq_top=80, iq_bottom=20):
 
         if self.mod_res is None:
             raise ValueError('Model results are non-existent. Run the solver first.')
@@ -469,8 +537,7 @@ class GeneralEquilibriumModel:
         mod_res: pd.DataFrame = self.mod_res.copy()
 
         # Income and savings
-        mod_res['y'] = (mod_res['a_0'] * self.r) + (
-            mod_res['z'] * np.where(mod_res['skill_type'] == 'L', self.w, self.s))
+        mod_res['y'] = (mod_res['a_0'] * self.r) + (mod_res['z'] * np.where(mod_res['skill_type'] == 'L', self.w, self.s))
         mod_res['labour_inc_share'] = 1 - (mod_res['a_0'] * self.r) / mod_res['y']
         mod_res['s_rate']           = (mod_res['a_1'] - mod_res['a_0']) / mod_res['y']
 
@@ -494,16 +561,13 @@ class GeneralEquilibriumModel:
         mean_V_H: float       = (H_df['V'] * H_df['dens']).sum() / H_df['dens'].sum()
         H_agg  : float        = (H_df['z'] * H_df['dens']).sum()
 
-        ls_share: float = self.w * L_agg
-        hs_share: float = self.s * H_agg
-        k_share : float = self.r * aggregate_K
-        nom_gdp : float = ls_share + hs_share + k_share
-        ls_share        = ls_share / nom_gdp
-        hs_share        = hs_share / nom_gdp
-        k_share         = k_share  / nom_gdp
+        real_gdp: float = self.Y
 
-        # Real GDP = nominal GDP (one good, p=1)
-        real_gdp  : float = nom_gdp
+        ls_share: float = self.w * L_agg      / real_gdp
+        hs_share: float = self.s * H_agg      / real_gdp
+        k_share : float = self.r * aggregate_K / real_gdp
+        offshoring_share: float = 1 - ls_share - hs_share - k_share
+
         K_to_Y    : float = aggregate_K / real_gdp
         skill_prem: float = self.s / self.w
         w_to_wstar: float = self.w / self.ModelPar.w_star
@@ -532,6 +596,7 @@ class GeneralEquilibriumModel:
             'low_skill_share'     : ls_share,
             'high_skill_share'    : hs_share,
             'k_share'             : k_share,
+            'offshoring_share'    : offshoring_share,
             'real_gdp'            : real_gdp,
             'K/Y'                 : K_to_Y,
             'skill_premium'       : skill_prem,
@@ -545,10 +610,11 @@ class GeneralEquilibriumModel:
             'I'                   : self.I,
             'w'                   : self.w,
             's'                   : self.s,
-            'Y'                   : self.Y,
+            'inc'                 : self.Y,
             'r'                   : self.r
         }
 
+        self.mod_res       = mod_res.copy()
         self.economy_stats = ret
 
         return ret
