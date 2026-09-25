@@ -6,3 +6,4 @@ log/
 fp_restat_replication_package/
 code/reduced_form/
 code/__pycache__
+MODEL_STATE.md

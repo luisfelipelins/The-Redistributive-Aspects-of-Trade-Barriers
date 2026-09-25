@@ -9,19 +9,19 @@ from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
-DATA_DIR           = ROOT_DIR / "data"
-DATA_RAW           = DATA_DIR / "raw"
-DATA_FINAL         = DATA_DIR / "final"
-DATA_PARAMS        = DATA_DIR / "parameters"
-DATA_INT           = DATA_DIR / "intermediate"
-OUTPUTS            = ROOT_DIR / "outputs"
+DATA_DIR           = ROOT_DIR / 'data'
+DATA_RAW           = DATA_DIR / 'raw'
+DATA_FINAL         = DATA_DIR / 'final'
+DATA_PARAMS        = DATA_DIR / 'parameters'
+DATA_INT           = DATA_DIR / 'intermediate'
+OUTPUTS            = ROOT_DIR / 'outputs'
 OUTPUTS_MOTIVATION = OUTPUTS / 'motivation'
 OUTPUTS_GMM        = OUTPUTS / 'gmm'
 OUTPUTS_QUANT_EX   = OUTPUTS / 'quant_exercises'
-LOG                = ROOT_DIR / "log"
-LOG_ISOLATED       = LOG / "isolated_runs"
-LOG_GMM            = LOG / "gmm"
+LOG                = ROOT_DIR / 'log'
+LOG_ISOLATED       = LOG / 'isolated_runs'
+LOG_GMM            = LOG / 'gmm'
 CONFIG             = ROOT_DIR / 'config'
 
-for folder in [DATA_RAW, DATA_FINAL, DATA_PARAMS, DATA_INT, OUTPUTS, OUTPUTS_MOTIVATION, OUTPUTS_GMM, OUTPUTS_QUANT_EX, LOG_ISOLATED, LOG_GMM, CONFIG]:
-    folder.mkdir(parents=True, exist_ok=True)
+for folder in [DATA_RAW,DATA_FINAL,DATA_PARAMS,DATA_INT,OUTPUTS,OUTPUTS_MOTIVATION,OUTPUTS_GMM,OUTPUTS_QUANT_EX,LOG_ISOLATED,LOG_GMM,CONFIG]:
+    folder.mkdir(parents=True,exist_ok=True)

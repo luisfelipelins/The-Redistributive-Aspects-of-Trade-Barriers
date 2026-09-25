@@ -14,21 +14,23 @@ import numba as nb
 from scipy.optimize import brentq
 
 import functions
-from functions import t, Omega
+from functions import t,Omega
+from ces_production import production
 
-def solve_transition_system(K_t, I_t, β_t, H, L, ModelPar):
+
+def solve_transition_system(K_t,I_t,β_t,H,L,ModelPar):
     '''
     Solves at time period t the system determining the aggregate variables given K_t
     and a candidate marginal task I_t.
 
     Given I_t, K_t and β_t, find:
       (1) w_t from the MT condition: w = w*·β_t·t(I)          -> (TA)
-      (2) Y_t from the L market clearing: L = (1-I)·κ·Y/(w·Ω) -> (TB)
-      (3) s_t from the H market clearing: H = α·Y/s           -> (TC)
-      (4) r_t from the K market clearing: K = γ·Y/r           -> (TD)
+      (2) S_t = L/(1-I_t) and X_t from the HK CES nest
+      (3) Y_t from the outer CES nest
+      (4) s_t and r_t from the marginal products of H and K
 
-    The zero-profit condition is not imposed here: it is the residual rooted in I_t by
-    solve_transition_system_wrapper.
+    The low-skill pricing condition p_L = w_t·Ω is imposed by
+    solve_transition_system_wrapper, ensuring zero profit at domestic prices.
 
     Part of: solve_transition_system -> transition_system_residual
              -> solve_transition_system_wrapper
@@ -55,27 +57,19 @@ def solve_transition_system(K_t, I_t, β_t, H, L, ModelPar):
 
     '''
 
-    κ  : float = 1 - ModelPar.α - ModelPar.γ
+    w_t = ModelPar.w_star * β_t * t(I_t,ModelPar)
+    Ω_t = Omega(I_t,ModelPar)
+    sol = production(L / (1 - I_t),H,K_t,ModelPar)
 
-    w_t: float = ModelPar.w_star * β_t * t(I_t, ModelPar)
-    Ω_t: float = Omega(I_t, ModelPar)
-    Y_t: float = (L * w_t * Ω_t) / ((1 - I_t) * κ)
-    s_t: float = ModelPar.α * Y_t / H
-    r_t: float = ModelPar.γ * Y_t / K_t
+    sol.update(w=w_t,I=I_t,K=K_t,Ω=Ω_t)
+    return sol
 
-    return {'w': w_t,
-            's': s_t,
-            'r': r_t,
-            'Y': Y_t,
-            'I': I_t,
-            'K': K_t,
-            'Ω': Ω_t}
 
-def transition_system_residual(I_t, K_t, β_t, H, L, ModelPar):
+def transition_system_residual(I_t,K_t,β_t,H,L,ModelPar):
     '''
-    Log zero-profit residual for a given guess of the marginal task at period t.
+    Log low-skill pricing residual for a given guess of the marginal task at period t.
 
-    R(I) = κ·log(w(I)·Ω(I)/κ) + α·log(s(I)/α) + γ·log(r(I)/γ)
+    R(I) = log(w(I)·Ω(I)/F_S(I))
 
     with w, s and r taken from solve_transition_system. At equilibrium R(I_t) = 0.
 
@@ -97,28 +91,25 @@ def transition_system_residual(I_t, K_t, β_t, H, L, ModelPar):
     Returns
     -------
     float
-        Log zero-profit residual.
+        Log low-skill pricing residual.
 
     '''
 
-    sol: dict  = solve_transition_system(K_t=K_t, I_t=I_t, β_t=β_t, H=H, L=L, ModelPar=ModelPar)
-    κ  : float = 1 - ModelPar.α - ModelPar.γ
+    sol: dict  = solve_transition_system(K_t=K_t,I_t=I_t,β_t=β_t,H=H,L=L,ModelPar=ModelPar)
+    return np.log(sol['w'] * sol['Ω'] / sol['pL'])
 
-    return (κ * np.log(sol['w'] * sol['Ω'] / κ)
-            + ModelPar.α * np.log(sol['s'] / ModelPar.α)
-            + ModelPar.γ * np.log(sol['r'] / ModelPar.γ))
 
-def solve_transition_system_wrapper(K_t, β_t, H, L, ModelPar, tol=1e-12, I_lb=1e-9, I_ub=1-1e-9):
+def solve_transition_system_wrapper(K_t,β_t,H,L,ModelPar,tol=1e-12,I_lb=1e-9,I_ub=1 - 1e-9):
     '''
     Solves the period-t production block given aggregate capital K_t and offshoring
     cost β_t.
 
     The system is reduced to a scalar root-finding problem in I_t: every candidate
-    I ∈ (0,1) pins down (w, Y, s, r) through (TA)-(TD), and the equilibrium I_t is the
-    one at which the log zero-profit residual vanishes.
+    I ∈ (0,1) pins down (w, Y, s, r), and equilibrium I_t is the
+    point at which the log low-skill pricing residual vanishes.
 
-    R(I) → +∞ as I → 1 because Y diverges with the L market clearing condition, so a
-    sign change over the bracket is enough to guarantee a unique interior root.
+    A sign change over the bracket identifies an interior equilibrium.
+    Points without an interior root are rejected.
 
     Parameters
     ----------
@@ -146,27 +137,32 @@ def solve_transition_system_wrapper(K_t, β_t, H, L, ModelPar, tol=1e-12, I_lb=1
 
     '''
 
-    args   : tuple = (K_t, β_t, H, L, ModelPar)
+    args: tuple = (K_t,β_t,H,L,ModelPar)
 
-    R_lb   : float = transition_system_residual(I_lb, *args)
-    R_ub   : float = transition_system_residual(I_ub, *args)
+    R_lb: float = transition_system_residual(I_lb,*args)
+    R_ub: float = transition_system_residual(I_ub,*args)
 
     if R_lb * R_ub > 0:
         raise ValueError(f'No interior I_t ∈ ({I_lb}, {I_ub}) satisfies the zero-profit '
                          f'condition for K_t={K_t}, β_t={β_t}: '
                          f'R({I_lb})={R_lb}, R({I_ub})={R_ub}.')
 
-    root: float = brentq(f=transition_system_residual, a=I_lb, b=I_ub, args=args, xtol=tol)
+    root: float = brentq(f=transition_system_residual,a=I_lb,b=I_ub,args=args,xtol=tol)
 
-    return solve_transition_system(K_t=K_t, I_t=root, β_t=β_t, H=H, L=L, ModelPar=ModelPar)
+    return solve_transition_system(K_t=K_t,I_t=root,β_t=β_t,H=H,L=L,ModelPar=ModelPar)
 
-def production_path(K_path, β_path, H, L, ModelPar):
+
+def production_path(K_path,τ_path,H,L,ModelPar):
     '''
     Solves the static production block at every date of a candidate capital path.
 
     Step 3 of the transition algorithm: the guessed capital path, together with the
-    post-shock offshoring costs, generates the complete candidate path of contemporaneous
-    prices and quantities.
+    post-shock tariffs, generates the complete candidate path of contemporaneous prices and
+    quantities, plus the duty collected at each date.
+
+    The offshoring cost is rebuilt from the tariff at every date, β_t = (1+τ_t)·β_eff, so
+    the cost the firm faces and the duty the government collects can never disagree. A
+    pure technology shock is a path of β_eff rather than of τ and is not what this takes.
 
     A period whose zero-profit condition has no interior root is a bad capital guess
     rather than a corner to be accommodated, so the underlying ValueError is re-raised
@@ -176,8 +172,8 @@ def production_path(K_path, β_path, H, L, ModelPar):
     ----------
     K_path : array_like
         Candidate aggregate capital for t = 0, ..., T.
-    β_path : array_like
-        Offshoring cost for t = 0, ..., T. Must be the same length as K_path.
+    τ_path : array_like
+        Tariff wedge for t = 0, ..., T. Must be the same length as K_path.
     H : float
         Aggregate high-skill labour supply.
     L : float
@@ -188,16 +184,17 @@ def production_path(K_path, β_path, H, L, ModelPar):
     Returns
     -------
     dict
-        Keys I, w, s, r, Y, Ω, each a numpy array indexed by t.
+        Keys I, w, s, r, Y, Ω, β, R, each a numpy array indexed by t.
 
     '''
 
-    if len(K_path) != len(β_path):
-        raise ValueError(f'K_path has length {len(K_path)} but β_path has length {len(β_path)}.')
+    if len(K_path) != len(τ_path):
+        raise ValueError(f'K_path has length {len(K_path)} but τ_path has length {len(τ_path)}.')
 
-    n_periods: int  = len(K_path)
-    keys     : list = ['I', 'w', 's', 'r', 'Y', 'Ω']
-    out      : dict = {k: np.empty(n_periods) for k in keys}
+    n_periods: int        = len(K_path)
+    β_path   : np.ndarray = (1 + np.asarray(τ_path,dtype=float)) * ModelPar.β_eff
+    keys     : list       = ['I','w','s','r','Y','Ω']
+    out      : dict       = {k: np.empty(n_periods) for k in keys + ['β','R']}
 
     for period in range(n_periods):
         try:
@@ -208,16 +205,24 @@ def production_path(K_path, β_path, H, L, ModelPar):
                                                         ModelPar = ModelPar)
         except ValueError as exc:
             raise ValueError(f'Production block has no interior solution at t={period} '
-                             f'(K_t={K_path[period]}, β_t={β_path[period]}). '
-                             f'Underlying: {exc}') from exc
+                             f'(K_t={K_path[period]}, τ_t={τ_path[period]}, '
+                             f'β_t={β_path[period]}). Underlying: {exc}') from exc
 
         for k in keys:
             out[k][period] = sol[k]
 
+        out['β'][period] = β_path[period]
+        out['R'][period] = functions.tariff_revenue(w        = sol['w'],
+                                                    I        = sol['I'],
+                                                    L        = L,
+                                                    τ        = τ_path[period],
+                                                    ModelPar = ModelPar)
+
     return out
 
-@nb.njit(parallel=True, cache=True)
-def _bellman_step_core(V_next, inc, a_arr, joint_trans, σ, δ):
+
+@nb.njit(parallel=True,cache=True)
+def _bellman_step_core(V_next,inc,a_arr,joint_trans,σ,δ):
     """
     Numba-compiled single application of the Bellman operator.
 
@@ -257,33 +262,40 @@ def _bellman_step_core(V_next, inc, a_arr, joint_trans, σ, δ):
     n_states = inc.shape[0]
     n_assets = inc.shape[1]
 
-    V   = np.empty((n_states, n_assets))
-    pol = np.zeros((n_states, n_assets), dtype=np.int64)
+    V   = np.empty((n_states,n_assets))
+    pol = np.zeros((n_states,n_assets),dtype=np.int64)
 
     for i in nb.prange(n_states):
-        exp_V = np.dot(joint_trans[i], V_next)
+        exp_V = np.dot(joint_trans[i],V_next)
+
         for a in range(n_assets):
-            inc_ia = inc[i, a]
+            inc_ia = inc[i,a]
             best_v = -1e300
             best_j = 0
+
             for j in range(n_assets):
                 c = inc_ia - a_arr[j]
+
                 if c <= 0:
                     break
                 if c < 1e-10:
                     c = 1e-10
+
                 v = c ** (1 - σ) / (1 - σ) + δ * exp_V[j]
+
                 if v > best_v:
                     best_v = v
                     best_j = j
-            V[i, a]   = best_v
-            pol[i, a] = best_j
 
-    return V, pol
+            V[i,a]   = best_v
+            pol[i,a] = best_j
 
-def build_income_matrix(w, s, r, a_arr, state_grid):
+    return V,pol
+
+
+def build_income_matrix(w,s,r,transfer,a_arr,state_grid):
     '''
-    Builds the (n_states, n_assets) income matrix for one period's prices.
+    Builds the (n_states, n_assets) income matrix for one period's prices and rebate.
 
     Reproduces the per-state income vector that functions.model_vfi computes internally,
     so that the transition and the steady state face identical budget sets.
@@ -296,6 +308,8 @@ def build_income_matrix(w, s, r, a_arr, state_grid):
         High-skill wage.
     r : float
         Interest rate.
+    transfer : numpy.ndarray
+        (n_states,) tariff rebate received at each state this period.
     a_arr : numpy.ndarray
         Asset grid.
     state_grid : list
@@ -308,17 +322,18 @@ def build_income_matrix(w, s, r, a_arr, state_grid):
 
     '''
 
-    inc: np.ndarray = np.empty((len(state_grid), len(a_arr)))
+    inc: np.ndarray = np.empty((len(state_grid),len(a_arr)))
 
-    for idx, (f, z) in enumerate(state_grid):
-        L        : int = 1 if f == 'L' else 0
-        inc[idx]       = functions.income_func(r=r, a=a_arr, z=np.exp(z), w=w, s=s, L=L)
+    for idx,(f,z) in enumerate(state_grid):
+        L: int = 1 if f == 'L' else 0
+        inc[idx] = functions.income_func(r=r,a=a_arr,z=np.exp(z),w=w,s=s,L=L,T=transfer[idx])
 
     return inc
 
-def bellman_step(V_next, w, s, r, a_arr, state_grid, joint_trans, ModelPar):
+
+def bellman_step(V_next,w,s,r,transfer,a_arr,state_grid,joint_trans,ModelPar):
     '''
-    One backward step of the household problem at period-t prices.
+    One backward step of the household problem at period-t prices and rebate.
 
     Parameters
     ----------
@@ -330,6 +345,8 @@ def bellman_step(V_next, w, s, r, a_arr, state_grid, joint_trans, ModelPar):
         High-skill wage at t.
     r : float
         Interest rate at t.
+    transfer : numpy.ndarray
+        (n_states,) tariff rebate received at each state at t.
     a_arr : numpy.ndarray
         Asset grid.
     state_grid : list
@@ -346,25 +363,30 @@ def bellman_step(V_next, w, s, r, a_arr, state_grid, joint_trans, ModelPar):
 
     '''
 
-    inc: np.ndarray = build_income_matrix(w=w, s=s, r=r, a_arr=a_arr, state_grid=state_grid)
+    inc: np.ndarray = build_income_matrix(w=w,s=s,r=r,transfer=transfer,a_arr=a_arr,state_grid=state_grid)
 
-    return _bellman_step_core(V_next, inc, a_arr, joint_trans, ModelPar.σ, ModelPar.δ)
+    return _bellman_step_core(V_next,inc,a_arr,joint_trans,ModelPar.σ,ModelPar.δ)
 
-def solve_households_backward(price_path, V_terminal, a_arr, state_grid, joint_trans,
-                              ModelPar, store_V=False):
+
+def solve_households_backward(price_path,transfer_path,V_terminal,a_arr,state_grid,
+                              joint_trans,ModelPar,store_V=False):
     '''
     Step 4 of the transition algorithm: solves the household problem backward along a
     candidate price path.
 
     Starting from the terminal continuation value V_{T+1} = V¹, applies the Bellman
     operator once per period for t = T, T-1, ..., 0. Households therefore choose current
-    savings while anticipating the entire future candidate price path.
+    savings while anticipating the entire future candidate price path, and the rebate they
+    anticipate along with it.
 
     Parameters
     ----------
     price_path : dict
         Contemporaneous prices as returned by production_path; keys w, s and r must each
         be an array indexed by t = 0, ..., T.
+    transfer_path : numpy.ndarray
+        (T+1, n_states) rebate received at each state and date. The government balances its
+        budget period by period, so each row is set by that date's own revenue.
     V_terminal : numpy.ndarray
         (n_states, n_assets) terminal continuation value V_{T+1}, normally the value
         function of the post-shock stationary equilibrium.
@@ -392,37 +414,43 @@ def solve_households_backward(price_path, V_terminal, a_arr, state_grid, joint_t
 
     n_periods: int = len(price_path['w'])
 
-    for key in ['w', 's', 'r']:
+    for key in ['w','s','r']:
         if len(price_path[key]) != n_periods:
-            raise ValueError(f"price_path['{key}'] has length {len(price_path[key])}, "
-                             f"expected {n_periods}.")
+            raise ValueError(f"price_path['{key}'] has length {len(price_path[key])}, " f"expected {n_periods}.")
 
-    n_states, n_assets = V_terminal.shape
+    if len(transfer_path) != n_periods:
+        raise ValueError(f'transfer_path has length {len(transfer_path)}, expected {n_periods}.')
 
-    pol_path: np.ndarray = np.empty((n_periods, n_states, n_assets), dtype=np.int64)
-    V_path  : np.ndarray = np.empty((n_periods, n_states, n_assets)) if store_V else None
+    n_states,n_assets = V_terminal.shape
 
-    V_next  : np.ndarray = V_terminal
+    pol_path: np.ndarray = np.empty((n_periods,n_states,n_assets),dtype=np.int64)
+    V_path  : np.ndarray = np.empty((n_periods,n_states,n_assets)) if store_V else None
 
-    for period in range(n_periods - 1, -1, -1):
-        V_t, pol_t = bellman_step(V_next      = V_next,
-                                  w           = price_path['w'][period],
-                                  s           = price_path['s'][period],
-                                  r           = price_path['r'][period],
-                                  a_arr       = a_arr,
-                                  state_grid  = state_grid,
-                                  joint_trans = joint_trans,
-                                  ModelPar    = ModelPar)
+    V_next: np.ndarray = V_terminal
+
+    for period in range(n_periods - 1,-1,-1):
+        V_t,pol_t = bellman_step(V_next      = V_next,
+                                 w           = price_path['w'][period],
+                                 s           = price_path['s'][period],
+                                 r           = price_path['r'][period],
+                                 transfer    = transfer_path[period],
+                                 a_arr       = a_arr,
+                                 state_grid  = state_grid,
+                                 joint_trans = joint_trans,
+                                 ModelPar    = ModelPar)
 
         pol_path[period] = pol_t
+
         if store_V:
             V_path[period] = V_t
+
         V_next = V_t
 
-    return pol_path, (V_path if store_V else V_next)
+    return pol_path,(V_path if store_V else V_next)
+
 
 @nb.njit(cache=True)
-def _push_distribution_core(dens, pol, joint_trans):
+def _push_distribution_core(dens,pol,joint_trans):
     """
     Numba-compiled single forward step of the distribution: μ_{t+1} = T(g_t, Q)' μ_t.
 
@@ -454,20 +482,24 @@ def _push_distribution_core(dens, pol, joint_trans):
     n_states = dens.shape[0]
     n_assets = dens.shape[1]
 
-    out = np.zeros((n_states, n_assets))
+    out = np.zeros((n_states,n_assets))
 
     for i in range(n_states):
         for a in range(n_assets):
-            mass = dens[i, a]
+            mass = dens[i,a]
+
             if mass == 0.0:
                 continue
-            j_next = pol[i, a]
+
+            j_next = pol[i,a]
+
             for jj in range(n_states):
-                out[jj, j_next] += mass * joint_trans[i, jj]
+                out[jj,j_next] += mass * joint_trans[i,jj]
 
     return out
 
-def push_distribution(dens, pol, joint_trans):
+
+def push_distribution(dens,pol,joint_trans):
     '''
     One period of forward iteration on the distribution of households.
 
@@ -487,9 +519,10 @@ def push_distribution(dens, pol, joint_trans):
 
     '''
 
-    return _push_distribution_core(dens, pol, joint_trans)
+    return _push_distribution_core(dens,pol,joint_trans)
 
-def aggregate_capital(dens, a_arr):
+
+def aggregate_capital(dens,a_arr):
     '''
     Aggregate capital implied by a distribution over (state, asset) cells.
 
@@ -507,9 +540,10 @@ def aggregate_capital(dens, a_arr):
 
     '''
 
-    return float((dens * a_arr[None, :]).sum())
+    return float((dens * a_arr[None,:]).sum())
 
-def simulate_distribution_forward(pol_path, dens_0, a_arr, joint_trans, store_dens=False):
+
+def simulate_distribution_forward(pol_path,dens_0,a_arr,joint_trans,store_dens=False):
     '''
     Step 5 of the transition algorithm: propagates the distribution forward and reads off
     the capital implied by household decisions.
@@ -550,26 +584,28 @@ def simulate_distribution_forward(pol_path, dens_0, a_arr, joint_trans, store_de
     n_periods: int = pol_path.shape[0]
 
     if pol_path.shape[1:] != dens_0.shape:
-        raise ValueError(f'pol_path implies states {pol_path.shape[1:]} but dens_0 has '
-                         f'shape {dens_0.shape}.')
+        raise ValueError(f'pol_path implies states {pol_path.shape[1:]} but dens_0 has ' f'shape {dens_0.shape}.')
 
     K_imp    : np.ndarray = np.empty(n_periods)
     dens_path: np.ndarray = np.empty((n_periods,) + dens_0.shape) if store_dens else None
 
-    dens     : np.ndarray = dens_0
-    K_imp[0]              = aggregate_capital(dens_0, a_arr)
+    dens    : np.ndarray = dens_0
+    K_imp[0]             = aggregate_capital(dens_0,a_arr)
+
     if store_dens:
         dens_path[0] = dens_0
 
     for period in range(n_periods - 1):
-        dens                  = push_distribution(dens, pol_path[period], joint_trans)
-        K_imp[period + 1]     = aggregate_capital(dens, a_arr)
+        dens              = push_distribution(dens,pol_path[period],joint_trans)
+        K_imp[period + 1] = aggregate_capital(dens,a_arr)
+
         if store_dens:
             dens_path[period + 1] = dens
 
-    return K_imp, (dens_path if store_dens else dens)
+    return K_imp,(dens_path if store_dens else dens)
 
-def initial_capital_guess(K_0, K_terminal, n_periods):
+
+def initial_capital_guess(K_0,K_terminal,n_periods):
     '''
     Smooth interpolation between the initial and final capital stocks, used to start the
     shooting algorithm.
@@ -594,22 +630,29 @@ def initial_capital_guess(K_0, K_terminal, n_periods):
 
     '''
 
-    return np.linspace(K_0, K_terminal, n_periods)
+    return np.linspace(K_0,K_terminal,n_periods)
 
-def solve_transition_path(K_0, β_path, H, L, V_terminal, dens_0, a_arr, state_grid,
-                          joint_trans, ModelPar, K_terminal=None, K_guess=None, ξ=0.3,
-                          tol=2e-4, max_iter=300, max_seconds=None, stall_window=15,
-                          stall_tol=0.05, verbose=True, log_path=None, store_paths=False):
+
+def solve_transition_path(K_0,τ_path,H,L,state_probs,V_terminal,dens_0,a_arr,
+                          state_grid,joint_trans,ModelPar,K_terminal=None,K_guess=None,
+                          damp=0.3,tol=2e-4,max_iter=300,max_seconds=None,
+                          stall_window=15,stall_tol=0.05,verbose=True,log_path=None,
+                          store_paths=False):
     '''
     Steps 2 to 8 of the transition algorithm: shooting on the aggregate capital path.
 
-    Iterates guess K → production block → households backward → distribution forward →
-    implied K → damped update, until
+    Iterates guess K → production block → rebate → households backward → distribution
+    forward → implied K → damped update, until
 
         max_{1<=t<=T} |K_imp_t / K_t - 1| < tol.
 
     K_0 is predetermined by μ⁰ and is never updated, so its residual is identically zero
     and is excluded from the convergence criterion.
+
+    The rebate adds no fixed point of its own. Each date's revenue follows from that date's
+    (w, I), and the scale μ_t integrates against the exogenous (f,z) marginal, so the whole
+    transfer path is a by-product of the price path and is rebuilt with it on every
+    iteration. The government balances its budget date by date, not in present value.
 
     The loop always terminates: it stops on convergence, on max_iter, or on max_seconds,
     and reports which in stop_reason. Per-iteration timings are printed and optionally
@@ -619,12 +662,16 @@ def solve_transition_path(K_0, β_path, H, L, V_terminal, dens_0, a_arr, state_g
     ----------
     K_0 : float
         Predetermined initial capital.
-    β_path : array_like
-        Offshoring cost for t = 0, ..., T.
+    τ_path : array_like
+        Tariff wedge for t = 0, ..., T. The offshoring cost is rebuilt from it as
+        β_t = (1+τ_t)·β_eff.
     H : float
         Aggregate high-skill labour supply.
     L : float
         Aggregate low-skill labour supply.
+    state_probs : numpy.ndarray
+        (n_states,) stationary probability of each (skill, z) state, as carried by
+        GeneralEquilibriumModel.state_probs.
     V_terminal : numpy.ndarray
         Terminal continuation value V_{T+1}, the post-shock steady-state value function.
     dens_0 : numpy.ndarray
@@ -642,8 +689,9 @@ def solve_transition_path(K_0, β_path, H, L, V_terminal, dens_0, a_arr, state_g
         Required unless K_guess is supplied.
     K_guess : array_like or None, optional
         Explicit starting path. Overrides K_terminal. Its first entry is replaced by K_0.
-    ξ : float, optional
-        Damping weight on the implied path, 0 < ξ < 1. The default is 0.3.
+    damp : float, optional
+        Damping weight on the implied path, 0 < damp < 1. The default is 0.3. Unrelated to
+        the model's rebate progressivity ModelPar.ξ.
     tol : float, optional
         Convergence tolerance on the maximum relative residual. The default is 2e-4.
         Savings policies are grid indices, so K_imp is a step function of the guessed K
@@ -671,32 +719,34 @@ def solve_transition_path(K_0, β_path, H, L, V_terminal, dens_0, a_arr, state_g
     Returns
     -------
     dict
-        Keys: K, I, w, s, r, Y, Ω, K_imp, residual, n_iter, converged, stop_reason,
-        resid_history, iter_seconds, and V_path / dens_path when store_paths.
+        Keys: K, I, w, s, r, Y, Ω, β, R, transfer, K_imp, residual, n_iter, converged,
+        stop_reason, resid_history, iter_seconds, and V_path / dens_path when store_paths.
 
     '''
 
-    if not 0 < ξ < 1:
-        raise ValueError(f'ξ must lie strictly between 0 and 1, got {ξ}.')
+    if not 0 < damp < 1:
+        raise ValueError(f'damp must lie strictly between 0 and 1, got {damp}.')
 
-    n_periods: int = len(β_path)
+    n_periods: int = len(τ_path)
 
     if K_guess is None:
         if K_terminal is None:
             raise ValueError('Supply either K_terminal or an explicit K_guess.')
-        K_path: np.ndarray = initial_capital_guess(K_0, K_terminal, n_periods)
+
+        K_path: np.ndarray = initial_capital_guess(K_0,K_terminal,n_periods)
     else:
-        K_path: np.ndarray = np.asarray(K_guess, dtype=float).copy()
+        K_path: np.ndarray = np.asarray(K_guess,dtype=float).copy()
+
         if len(K_path) != n_periods:
-            raise ValueError(f'K_guess has length {len(K_path)} but β_path has {n_periods}.')
+            raise ValueError(f'K_guess has length {len(K_path)} but τ_path has {n_periods}.')
 
     K_path[0] = K_0
 
     def emit(line):
         if verbose:
-            print(line, flush=True)
+            print(line,flush=True)
         if log_path is not None:
-            with open(log_path, 'a', encoding='utf-8') as handle:
+            with open(log_path,'a',encoding='utf-8') as handle:
                 handle.write(line + '\n')
 
     resid_history: list       = []
@@ -708,29 +758,42 @@ def solve_transition_path(K_0, β_path, H, L, V_terminal, dens_0, a_arr, state_g
     residual     : float      = np.inf
     extras       : dict       = {}
 
-    emit(f'transition: T={n_periods-1}, ξ={ξ}, tol={tol:.1e}, max_iter={max_iter}, '
-         f'max_seconds={max_seconds}')
+    transfer_path: np.ndarray = None
+
+    emit(f'transition: T={n_periods-1}, damp={damp}, tol={tol:.1e}, max_iter={max_iter}, '
+         f'max_seconds={max_seconds}, ξ={ModelPar.ξ}, rebate_share={ModelPar.rebate_share}')
 
     t_start: float = time.time()
 
-    for n_iter in range(1, max_iter + 1):
+    for n_iter in range(1,max_iter + 1):
 
         t_iter: float = time.time()
 
         try:
-            prices = production_path(K_path=K_path, β_path=β_path, H=H, L=L, ModelPar=ModelPar)
+            prices = production_path(K_path=K_path,τ_path=τ_path,H=H,L=L,ModelPar=ModelPar)
         except ValueError as exc:
-            raise ValueError(f'Capital guess at iteration {n_iter} left the region where '
-                             f'the production block has an interior solution. {exc}') from exc
+            raise ValueError(f'Capital guess at iteration {n_iter} left the region where ' f'the production block has an interior solution. {exc}') from exc
 
-        pol_path, V_out = solve_households_backward(
-            price_path = prices, V_terminal = V_terminal, a_arr = a_arr,
-            state_grid = state_grid, joint_trans = joint_trans, ModelPar = ModelPar,
-            store_V    = store_paths)
+        transfer_path = np.array([
+            functions.rebate_transfer(state_grid  = state_grid,
+                                      state_probs = state_probs,
+                                      w           = prices['w'][period],
+                                      s           = prices['s'][period],
+                                      R           = prices['R'][period],
+                                      ModelPar    = ModelPar)
+            for period in range(n_periods)])
 
-        K_imp, dens_out = simulate_distribution_forward(
-            pol_path = pol_path, dens_0 = dens_0, a_arr = a_arr,
-            joint_trans = joint_trans, store_dens = store_paths)
+        pol_path,V_out = solve_households_backward(
+            price_path=prices,
+            transfer_path=transfer_path,
+            V_terminal=V_terminal,
+            a_arr=a_arr,
+            state_grid=state_grid,
+            joint_trans=joint_trans,
+            ModelPar=ModelPar,
+            store_V=store_paths)
+
+        K_imp,dens_out = simulate_distribution_forward(pol_path=pol_path,dens_0=dens_0,a_arr=a_arr,joint_trans=joint_trans,store_dens=store_paths)
 
         rel_resid: np.ndarray = np.abs(K_imp[1:] / K_path[1:] - 1)
         residual : float      = float(rel_resid.max())
@@ -745,7 +808,7 @@ def solve_transition_path(K_0, β_path, H, L, V_terminal, dens_0, a_arr, state_g
              f'{elapsed_iter:.2f}s (total {elapsed_total:.1f}s)')
 
         if store_paths:
-            extras = {'V_path': V_out, 'dens_path': dens_out}
+            extras = {'V_path': V_out,'dens_path': dens_out}
 
         if residual < tol:
             converged   = True
@@ -757,8 +820,9 @@ def solve_transition_path(K_0, β_path, H, L, V_terminal, dens_0, a_arr, state_g
             break
 
         if stall_window is not None and len(resid_history) >= 2 * stall_window:
-            recent: np.ndarray = np.array(resid_history[-stall_window:])
-            earlier: np.ndarray = np.array(resid_history[-2*stall_window:-stall_window])
+            recent : np.ndarray = np.array(resid_history[-stall_window:])
+            earlier: np.ndarray = np.array(resid_history[-2 * stall_window:-stall_window])
+
             if recent.min() >= earlier.min() * (1 - stall_tol):
                 stop_reason = 'stalled'
                 emit(f'  stalled: best residual over the last {stall_window} iterations '
@@ -768,25 +832,28 @@ def solve_transition_path(K_0, β_path, H, L, V_terminal, dens_0, a_arr, state_g
                 break
 
         if n_iter < max_iter:
-            K_path[1:] = (1 - ξ) * K_path[1:] + ξ * K_imp[1:]
+            K_path[1:] = (1 - damp) * K_path[1:] + damp * K_imp[1:]
 
-    emit(f'  stopped: {stop_reason} after {n_iter} iterations, residual {residual:.4e}, '
-         f'{time.time()-t_start:.1f}s total')
+    emit(f'  stopped: {stop_reason} after {n_iter} iterations, residual {residual:.4e}, ' f'{time.time()-t_start:.1f}s total')
 
-    out: dict = {'K'            : K_path,
-                 'K_imp'        : K_imp,
-                 'residual'     : residual,
-                 'n_iter'       : n_iter,
-                 'converged'    : converged,
-                 'stop_reason'  : stop_reason,
+    out: dict = {'K': K_path,
+                 'K_imp': K_imp,
+                 'τ': np.asarray(τ_path,dtype=float),
+                 'transfer': transfer_path,
+                 'residual': residual,
+                 'n_iter': n_iter,
+                 'converged': converged,
+                 'stop_reason': stop_reason,
                  'resid_history': np.array(resid_history),
-                 'iter_seconds' : np.array(iter_seconds)}
+                 'iter_seconds': np.array(iter_seconds)}
+    out['V_0'] = V_out[0] if store_paths else V_out
     out.update(prices)
     out.update(extras)
 
     return out
 
-def tighten_steady_state(model, a_arr, state_grid, joint_trans, tol_V=1e-12, tol_dens=1e-14,
+
+def tighten_steady_state(model,a_arr,state_grid,joint_trans,tol_V=1e-12,tol_dens=1e-14,
                          max_iter=300_000):
     '''
     Re-solves a converged model's household side on the common transition grid, iterating
@@ -822,46 +889,57 @@ def tighten_steady_state(model, a_arr, state_grid, joint_trans, tol_V=1e-12, tol
 
     '''
 
-    V  : np.ndarray = np.zeros((len(state_grid), len(a_arr)))
+    V  : np.ndarray = np.zeros((len(state_grid),len(a_arr)))
     pol: np.ndarray = None
 
     for _ in range(max_iter):
-        V_new, pol = bellman_step(V_next = V, w = model.w, s = model.s, r = model.r,
-                                  a_arr = a_arr, state_grid = state_grid,
-                                  joint_trans = joint_trans, ModelPar = model.ModelPar)
+        V_new,pol = bellman_step(
+            V_next=V,
+            w=model.w,
+            s=model.s,
+            r=model.r,
+            transfer=model.transfer,
+            a_arr=a_arr,
+            state_grid=state_grid,
+            joint_trans=joint_trans,
+            ModelPar=model.ModelPar)
         gap: float = np.max(np.abs(V_new - V))
         V          = V_new
+
         if gap < tol_V:
             break
 
     dens: np.ndarray = np.ones_like(V) / V.size
 
     for _ in range(max_iter):
-        dens_new: np.ndarray = push_distribution(dens, pol, joint_trans)
+        dens_new: np.ndarray = push_distribution(dens,pol,joint_trans)
         gap     : float      = np.max(np.abs(dens_new - dens))
         dens                 = dens_new
+
         if gap < tol_dens:
             break
 
     dens = dens * model.ModelPar.M
 
-    return {'V'   : V,
-            'pol' : pol,
+    return {'V': V,
+            'pol': pol,
             'dens': dens,
-            'K'   : aggregate_capital(dens, a_arr),
-            'w'   : model.w,
-            's'   : model.s,
-            'r'   : model.r}
+            'K': aggregate_capital(dens,a_arr),
+            'w': model.w,
+            's': model.s,
+            'r': model.r}
 
-def build_common_asset_grid(models, CalibPar, ub_margin=1.0):
+
+def build_common_asset_grid(models,CalibPar,ub_margin=1.0):
     '''
     Builds the single asset grid shared by both stationary equilibria and every period
     of the transition.
 
-    model_vfi sizes its own grid from max(w, s)·vfi_ubmul, so each steady state and each
-    transition period would otherwise sit on a different grid and the distribution could
-    not be carried across them. The common upper bound is taken from the highest wage
-    observed across the supplied models.
+    model_vfi sizes its own grid from (max(w, s) + max transfer)·vfi_ubmul, so each steady
+    state and each transition period would otherwise sit on a different grid and the
+    distribution could not be carried across them. The common upper bound takes the highest
+    wage and the largest rebate observed across the supplied models, matching the bound
+    model_vfi would have built for whichever of them is most generous.
 
     Parameters
     ----------
@@ -880,15 +958,16 @@ def build_common_asset_grid(models, CalibPar, ub_margin=1.0):
 
     '''
 
-    max_wage: float = max(max(mod.w, mod.s) for mod in models)
-    ub      : float = max_wage * CalibPar.vfi_ubmul * ub_margin
-    dist    : float = (ub - CalibPar.vfi_lb) / CalibPar.vfi_N
+    max_income: float = max(max(mod.w,mod.s) + mod.transfer.max() for mod in models)
+    ub        : float = max_income * CalibPar.vfi_ubmul * ub_margin
+    dist      : float = (ub - CalibPar.vfi_lb) / CalibPar.vfi_N
 
-    a_grid  : list  = [CalibPar.vfi_lb + (i * dist) for i in range(CalibPar.vfi_N + 1)]
+    a_grid: list = [CalibPar.vfi_lb + (i * dist) for i in range(CalibPar.vfi_N + 1)]
 
     return a_grid
 
-def resolve_on_common_grid(model, a_grid):
+
+def resolve_on_common_grid(model,a_grid):
     '''
     Re-solves a converged model's household side on a supplied asset grid, holding its
     equilibrium prices fixed.
@@ -911,18 +990,18 @@ def resolve_on_common_grid(model, a_grid):
 
     '''
 
-    z_grid, trans_z         = functions.rouwenhorst_trans_matrix(ModelPar=model.ModelPar,
-                                                                 CalibPar=model.CalibPar)
+    z_grid,trans_z = functions.rouwenhorst_trans_matrix(ModelPar=model.ModelPar,CalibPar=model.CalibPar)
     trans_f    : np.ndarray = functions.create_LH_skill_mat(ModelPar=model.ModelPar)
-    joint_trans: np.ndarray = np.kron(trans_f, trans_z)
-    state_grid : list       = [(f, z) for f in ['L', 'H'] for z in z_grid]
+    joint_trans: np.ndarray = np.kron(trans_f,trans_z)
+    state_grid : list       = [(f,z) for f in ['L','H'] for z in z_grid]
 
-    pol_func, pol_idx, a_grid_out, df_val_func, V_arr, _ = functions.model_vfi(
+    pol_func,pol_idx,a_grid_out,df_val_func,V_arr,_ = functions.model_vfi(
         w                 = model.w,
         s                 = model.s,
         r                 = model.r,
         income_func       = functions.income_func,
         state_grid        = state_grid,
+        transfer          = model.transfer,
         joint_trans       = joint_trans,
         ModelPar          = model.ModelPar,
         CalibPar          = model.CalibPar,
@@ -942,17 +1021,16 @@ def resolve_on_common_grid(model, a_grid):
         df_val_func = df_val_func,
         ModelPar    = model.ModelPar)
 
-    pol_mat : np.ndarray = np.array([pol_idx[st] for st in state_grid], dtype=np.int64)
+    pol_mat : np.ndarray = np.array([pol_idx[st] for st in state_grid],dtype=np.int64)
     n_assets: int        = len(a_grid_out)
-    dens    : np.ndarray = stat_dist['dens'].to_numpy().reshape(len(state_grid), n_assets)
+    dens    : np.ndarray = stat_dist['dens'].to_numpy().reshape(len(state_grid),n_assets)
     dens                 = dens * model.ModelPar.M
 
-    return {'V'          : V_arr,
-            'pol'        : pol_mat,
-            'a_grid'     : np.array(a_grid_out),
-            'state_grid' : state_grid,
+    return {'V': V_arr,
+            'pol': pol_mat,
+            'a_grid': np.array(a_grid_out),
+            'state_grid': state_grid,
             'joint_trans': joint_trans,
-            'dens'       : dens,
-            'K'          : float((dens * np.array(a_grid_out)[None, :]).sum()),
-            'mod_res'    : mod_res}
-
+            'dens': dens,
+            'K': float((dens * np.array(a_grid_out)[None,:]).sum()),
+            'mod_res': mod_res}
