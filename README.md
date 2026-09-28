@@ -31,7 +31,7 @@ The four jointly targeted moments are:
 | `skill_premium` | High-skill-to-low-skill wage ratio |
 | `low_skill_share` | Low-skill labour income share, compared with `w * L / Y` in the model |
 
-The empirical low-skill income share is constructed as
+The empirical low-skill income share is constructed as:
 
 $$
 \mathrm{LS\_share}=\frac{1-\mathrm{capital\_income\_share}}{1+H\_to\_L},
@@ -123,7 +123,9 @@ Copy these files into `data/raw/` before running the full pipeline:
 | `bea_bop_direct_investment_income.xlsx` | Foreign direct investment income figures |
 | `ilccompensationtimeseries_2016.xlsx` | Domestic-to-foreign wage target in `external_calibration.py` |
 
-These are the local input files expected by the scripts, including their existing column and sheet layouts. The code does not download these five files automatically. The motivation and calibration stages also retrieve data from FRED, BLS, the Federal Reserve's SHED, the Census Bureau, and OECD TiVA. Those stages require internet access, and data revisions can change the resulting calibration.
+These are the local input files expected by the scripts, including their existing column and sheet layouts. The code does not download these five files automatically. The motivation and calibration stages also retrieve data from FRED, BLS, the Federal Reserve's SHED, the Census Bureau, and OECD TiVA. Those stages require internet access, and data revisions can change the resulting calibration. The raw data needed to run this project can be found on OneDrive:
+
+https://1drv.ms/f/c/381604333a3d9f7b/IgBgi_KHMkJ4QKQhcKNw9RAnAfNZ4bKuD3oRzBcFpt8Z48E?e=lICFgn
 
 The parameter-file dependency is:
 
@@ -135,8 +137,6 @@ gmm_estimator.py
 gmm_jorgensen_sensitivity.py / quant_exercises.py / transition.py
     -> read both parameter files
 ```
-
-When reusing estimates, copy the corresponding pre- and post-estimation files together. Historical Cobb–Douglas estimates and earlier fixed-γ estimation histories are not interchangeable with the current four-parameter specification.
 
 ## Running the project
 
@@ -175,43 +175,3 @@ python -X utf8 code/transition.py
 
 The other entry-point scripts can be run in the same way, following their parameter-file dependencies.
 
-## Running on an AWS Linux machine
-
-On an existing Linux instance, clone the repository, create the Python environment, and provide the local data and FRED key as described above. No AWS-specific Python package is required by this project.
-
-Use a non-interactive plotting backend and unbuffered console output:
-
-```bash
-export MPLBACKEND=Agg
-export PYTHONUNBUFFERED=1
-mkdir -p log
-nohup python -X utf8 code/wrapper.py > log/wrapper.log 2>&1 &
-echo $! > log/wrapper.pid
-```
-
-This launches the pipeline in the background and redirects its console output to a log. Monitor progress with:
-
-```bash
-tail -f log/wrapper.log
-```
-
-The wrapper runs stages sequentially, and the current differential-evolution configuration uses `workers=1`. Additional instance cores do not automatically parallelize GMM evaluations. Runtime and memory requirements depend on the household grids, optimizer settings, and transition horizon; the repository does not provide a benchmark for selecting an instance size.
-
-## Results and numerical checks
-
-The main outputs are figures in PDF and tables in LaTeX. Numerical counterfactual results are also held in memory while the relevant script runs. Those in-memory objects are not shared between wrapper subprocesses.
-
-Two stationary welfare exercises in `quant_exercises.py` are:
-
-- `sec_B_redistribution_welfare.pdf`: varies ξ from −2 to 2 at the implemented tariff, keeping structural estimates fixed, and reports mean stationary welfare changes relative to ξ = 0. Failed equilibria are reported and appear as missing points.
-- `sec_B_weighted_welfare.pdf`: searches for the smallest pro-poor exponential decile-weight tilt that makes the implemented tariff a welfare maximum among the evaluated tariffs. Ties are allowed; infeasibility is reported explicitly. This is a grid-based stationary comparison, not a proof of optimality over a continuous tariff interval or a transition-welfare calculation.
-
-GMM records evaluation failures in `gmm_errors.log` within its run directory. A saved best candidate is not, by itself, evidence that optimization converged or all moments fit well; inspect the final objective, moment distances, and convergence status. Counterfactual and sensitivity calculations also depend on equilibrium convergence and numerical resolution.
-
-Run the available short tests before starting a long computation:
-
-```bash
-python -X utf8 -m unittest discover -s code -p "test_*.py"
-```
-
-The tests do not perform a full estimation or regenerate all empirical results. Existing figure and parameter filenames may be overwritten when their generating stages are rerun.
