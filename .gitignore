@@ -1,5 +1,6 @@
 # Ignore the virtual environment, data, and outputs
 venv/
+config/fred_key.txt
 data/
 outputs/
 log/

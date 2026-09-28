@@ -13,8 +13,8 @@ from scipy.optimize._differentialevolution import DifferentialEvolutionSolver
 from GeneralEquilibriumModel import TypeModelParameters,TypeCalibParameters,GeneralEquilibriumModel
 from config import LOG_GMM
 
-MOMENT_NAMES = ['I','w_to_wstar','skill_premium']
-PARAM_NAMES  = ['θ','w_star','β_eff']
+MOMENT_NAMES = ['I','w_to_wstar','skill_premium','low_skill_share']
+PARAM_NAMES  = ['θ','w_star','β_eff','γ']
 
 SEP = '-' * 65
 
@@ -25,17 +25,17 @@ DE_MAXITER = 1000
 DE_KWARGS = dict(popsize=15,tol=0,atol=1e-6,polish=True,workers=1,init='latinhypercube',updating='immediate')
 
 _RUNLOG_PAT = re.compile(r'^\s*(\d+)\s+θ=.*\bobj=([-\d.eE+]+)\s*$')
-_SUMMARY_PAT = re.compile(r'α=(\S+)\s+γ=\S+\s+β_eff=(\S+)\s+w_star=(\S+)\s*\n' r'\s*θ=(\S+)\s')
+_SUMMARY_PAT = re.compile(r'α=\S+\s+γ=(\S+)\s+β_eff=(\S+)\s+w_star=(\S+)\s*\n' r'\s*θ=(\S+)\s')
 
 
 def _write_eval_log(eval_dir,params,g,obj,data_moments):
-    θ,ws,β_eff = params
+    θ,ws,β_eff,γ = params
 
     with open(eval_dir / 'gmm_eval_res.log','w',encoding='utf-8') as f:
         f.write(f"GMM Evaluation  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"{SEP}\n")
         f.write(f"Parameters:\n")
-        f.write(f"  " f"  θ={θ:.6f}  β_eff={β_eff:.6f}  w_star={ws:.6f}\n")
+        f.write(f"  " f"  θ={θ:.6f}  β_eff={β_eff:.6f}  w_star={ws:.6f}  γ={γ:.6f}\n")
         f.write(f"{SEP}\n")
         f.write(f"Relative moment distances (data - model) / data:\n")
 
@@ -48,21 +48,21 @@ def _write_eval_log(eval_dir,params,g,obj,data_moments):
 
 
 def _append_run_log(run_log_path,eval_n,params,obj):
-    θ,ws,β_eff = params
+    θ,ws,β_eff,γ = params
 
     with open(run_log_path,'a',encoding='utf-8') as f:
-        f.write(f"{eval_n:>6}  θ={θ:.4f}  β_eff={β_eff:.4f} w_star={ws:.6f} obj={obj:.6e}\n")
+        f.write(f"{eval_n:>6}  θ={θ:.4f}  β_eff={β_eff:.4f} w_star={ws:.6f} γ={γ:.6f} obj={obj:.6e}\n")
 
 
 def _write_final_log(gmm_run_dir,params,g,obj,success,data_moments):
-    θ,ws,β_eff = params
+    θ,ws,β_eff,γ = params
 
     with open(gmm_run_dir / 'gmm_final_res.log','w',encoding='utf-8') as f:
         f.write(f"GMM Final Result  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"Converged: {success}\n")
         f.write(f"{SEP}\n")
         f.write(f"Final parameters:\n")
-        f.write(f"  " f"  θ={θ:.6f}  β_eff={β_eff:.6f}  w_star={ws:.6f}\n")
+        f.write(f"  " f"  θ={θ:.6f}  β_eff={β_eff:.6f}  w_star={ws:.6f}  γ={γ:.6f}\n")
         f.write(f"{SEP}\n")
 
         if g is None:
@@ -79,13 +79,13 @@ def _write_final_log(gmm_run_dir,params,g,obj,success,data_moments):
 
 
 def gmm_model_moments(params,ModelPar,CalibPar,data_moments,log_dir,log_summary_name):
-    θ,ws,β_eff = params
-    if not np.all(np.isfinite(params)) or θ <= 0 or ws <= 0 or β_eff < 1:
-        raise ValueError('Require θ > 0, w_star > 0 and β_eff >= 1.')
+    θ,ws,β_eff,γ = params
+    if not np.all(np.isfinite(params)) or θ <= 0 or ws <= 0 or β_eff < 1 or not 0 < γ < 1:
+        raise ValueError('Require θ > 0, w_star > 0, β_eff >= 1 and 0 < γ < 1.')
 
     modpar = TypeModelParameters(
         α            = ModelPar.α,
-        γ            = ModelPar.γ,
+        γ            = γ,
         ψ            = ModelPar.ψ,
         χ            = ModelPar.χ,
         β_eff        = β_eff,
@@ -136,14 +136,17 @@ def _parse_run_history(run_dir):
 
     Returns
     -------
-    P : ndarray, shape (n, 3)
-        Parameter vectors [θ, w_star, β_eff] in evaluation order.
+    P : ndarray, shape (n, 4)
+        Parameter vectors [θ, w_star, β_eff, γ] in evaluation order.
     E : ndarray, shape (n,)
         Objective values in evaluation order.
     """
 
     if 'Production: nested_ces' not in (run_dir / 'gmm_run.log').read_text(encoding='utf-8'):
         raise ValueError('Cannot resume a Cobb-Douglas run with the nested-CES estimator.')
+
+    if 'Estimated parameters: θ,w_star,β_eff,γ' not in (run_dir / 'gmm_run.log').read_text(encoding='utf-8'):
+        raise ValueError('Cannot resume a run that did not estimate γ with the low-skill income target.')
 
     eval_ns,objs = [],[]
 
@@ -158,7 +161,7 @@ def _parse_run_history(run_dir):
     if eval_ns != list(range(1,len(eval_ns) + 1)):
         raise ValueError(f"gmm_run.log in {run_dir} has gaps or out-of-order evaluations.")
 
-    P = np.empty((len(eval_ns),3))
+    P = np.empty((len(eval_ns),4))
 
     for i,n in enumerate(eval_ns):
         summary = run_dir / f'run_summary_{n:05d}.log'
@@ -172,8 +175,8 @@ def _parse_run_history(run_dir):
             raise ValueError(f"Could not parse parameters from {summary.name}. Runs logged "
                              f"before β was split into (1+τ)·β_eff cannot be resumed.")
 
-        α,β_eff,ws,θ = (float(v) for v in m.groups())
-        P[i]         = [θ,ws,β_eff]
+        γ,β_eff,ws,θ = (float(v) for v in m.groups())
+        P[i]         = [θ,ws,β_eff,γ]
 
     E         = np.asarray(objs)
     failed    = E >= 1e9
@@ -255,8 +258,8 @@ def _rebuild_de_solver(func,bounds,run_dir,disp=True):
 
 
 def run_gmm(ModelPar,CalibPar,data_moments,W,bounds=None,x0=None,algorithm='differential_evolution',resume_from=None):
-    if np.shape(W) != (3,3) or (bounds is not None and len(bounds) != 3) or (x0 is not None and len(x0) != 3):
-        raise ValueError('Nested-CES GMM requires three parameters and a 3-by-3 weight matrix.')
+    if np.shape(W) != (4,4) or (bounds is not None and len(bounds) != 4) or (x0 is not None and len(x0) != 4):
+        raise ValueError('Nested-CES GMM requires four parameters and a 4-by-4 weight matrix.')
 
     _bounds_based = ('differential_evolution','crs','simulated_annealing')
     _point_based  = ('nelder_mead','powell')
@@ -278,6 +281,8 @@ def run_gmm(ModelPar,CalibPar,data_moments,W,bounds=None,x0=None,algorithm='diff
             raise FileNotFoundError(f"No gmm_run.log in {gmm_run_dir}; nothing to resume from.")
         if 'Production: nested_ces' not in (gmm_run_dir / 'gmm_run.log').read_text(encoding='utf-8'):
             raise ValueError('Cannot resume a Cobb-Douglas run with the nested-CES estimator.')
+        if 'Estimated parameters: θ,w_star,β_eff,γ' not in (gmm_run_dir / 'gmm_run.log').read_text(encoding='utf-8'):
+            raise ValueError('Cannot resume a run that did not estimate γ with the low-skill income target.')
     else:
         timestamp   = datetime.now().strftime('%Y%m%d_%H%M%S')
         gmm_run_dir = LOG_GMM / f'gmm_run_{timestamp}'
@@ -291,7 +296,8 @@ def run_gmm(ModelPar,CalibPar,data_moments,W,bounds=None,x0=None,algorithm='diff
         f.write(f"GMM Run  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"Algorithm: {algorithm}\n")
         f.write("Production: nested_ces\n")
-        f.write(f"Calibrated production: α={ModelPar.α} γ={ModelPar.γ} ψ={ModelPar.ψ} χ={ModelPar.χ}\n")
+        f.write("Estimated parameters: θ,w_star,β_eff,γ\n")
+        f.write(f"Calibrated production: α={ModelPar.α} ψ={ModelPar.ψ} χ={ModelPar.χ}\n")
         f.write(f"{SEP}\n")
         f.write(f"Data moments:\n")
 
@@ -322,7 +328,7 @@ def run_gmm(ModelPar,CalibPar,data_moments,W,bounds=None,x0=None,algorithm='diff
         f.write(f"Policy parameters (fixed outside the estimation):\n")
         f.write(f"  τ={ModelPar.τ}  ξ={ModelPar.ξ}  rebate_share={ModelPar.rebate_share}\n")
         f.write(f"{SEP}\n")
-        f.write(f"{'eval':>6}  {'θ':>8}  {'β_eff':>8}  {'w_star':>8}  {'obj':>14}\n")
+        f.write(f"{'eval':>6}  {'θ':>8}  {'β_eff':>8}  {'w_star':>8}  {'γ':>8}  {'obj':>14}\n")
 
     eval_counter = [0]
     best         = {'obj': np.inf,'g': None,'params': None}

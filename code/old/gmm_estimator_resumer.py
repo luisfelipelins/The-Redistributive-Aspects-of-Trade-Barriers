@@ -1,16 +1,11 @@
 # -*- coding: utf-8 -*-
-"""
-Nested-CES GMM runner: estimate θ, w_star, β_eff and γ by differential evolution.
-Save the best valid result as post_gmm_params_ces.json.
-"""
-
 import numpy as np
 import json
 from GeneralEquilibriumModel import TypeCalibParameters,TypeModelParameters
-from config import DATA_PARAMS
+from config import DATA_PARAMS,LOG_GMM
 from GMM import run_gmm
 
-with open(DATA_PARAMS / 'pre_gmm_params_ces.json','r',encoding='utf-8') as f:
+with open(DATA_PARAMS / 'pre_gmm_params.json','r') as f:
     pre_gmm_params = json.load(f)
 
 CalibPar = TypeCalibParameters(
@@ -30,67 +25,59 @@ CalibPar = TypeCalibParameters(
     outer_loop_r_lb  = 0.001)
 
 ModelPar = TypeModelParameters(
-    α            = pre_gmm_params['parameters']['α'],
-    γ            = np.nan,
-    ψ            = pre_gmm_params['parameters']['ψ'],
-    χ            = pre_gmm_params['parameters']['χ'],
+    α            = np.nan,
+    γ            = pre_gmm_params['parameters']['γ'],
     β_eff        = np.nan,
-    τ            = pre_gmm_params['parameters']['τ'],
     w_star       = np.nan,
     θ            = np.nan,
     σ            = pre_gmm_params['parameters']['σ'],
     δ            = pre_gmm_params['parameters']['δ'],
-    ϱ            = pre_gmm_params['parameters']['ϱ'],
+    ρ            = pre_gmm_params['parameters']['ρ'],
     σ_ϵ          = pre_gmm_params['parameters']['σ_ϵ'],
     π_LL         = pre_gmm_params['parameters']['π_LL'],
     π_HH         = pre_gmm_params['parameters']['π_HH'],
     M            = pre_gmm_params['parameters']['M'],
+    τ            = pre_gmm_params['parameters']['τ'],
     ξ            = pre_gmm_params['parameters']['ξ'],
     rebate_share = pre_gmm_params['parameters']['rebate_share'])
 
 data_moments = {
+    'high_skill_share': pre_gmm_params['moments']['HS_share'],
     'skill_premium': pre_gmm_params['moments']['skill_premium'],
     'w_to_wstar': pre_gmm_params['moments']['w_to_wstar'],
-    'I': pre_gmm_params['moments']['I'],
-    'low_skill_share': pre_gmm_params['moments']['LS_share']}
+    'I': pre_gmm_params['moments']['I']}
 
-W      = np.eye(4)
-bounds = [(1e-6,40),(0.05,0.7),(1.0,7.0),(0.01,0.99)]  # θ, w_star, β_eff, γ
+W      = np.diag([1.0,1.0,1.0,1.0])
+bounds = [(0.1,0.55),(0.05,0.7),(1e-6,40),(1.0,7.0)]  # α, w_star, θ, β_eff
 
-# --- Stage 1: Differential Evolution ---
+resume_dir = sorted(LOG_GMM.glob('gmm_run_*'))[-1]
 
 print(f"\n{'='*65}")
-print(f"  Starting GMM estimation — algorithm: differential_evolution")
+print(f"  Resuming GMM estimation from {resume_dir.name}")
 print(f"{'='*65}\n")
 
-_,best_de = run_gmm(ModelPar=ModelPar,CalibPar=CalibPar,data_moments=data_moments,W=W,bounds=bounds,algorithm='differential_evolution')
-if best_de['params'] is None:
-    raise RuntimeError('No valid nested-CES equilibrium found; parameters were not saved.')
+_,best_de = run_gmm(
+    ModelPar=ModelPar,
+    CalibPar=CalibPar,
+    data_moments=data_moments,
+    W=W,
+    bounds=bounds,
+    algorithm='differential_evolution',
+    resume_from=resume_dir)
 
-all_bests = {'differential_evolution': best_de}
-
-# --- Select winner and save ---
-best_algo    = min(all_bests,key=lambda k: all_bests[k]['obj'])
-best_overall = all_bests[best_algo]
-
-print(f"\nBest algorithm: {best_algo}  (obj={best_overall['obj']:.8e})")
-
-θ,w_star,β_eff,γ = best_overall['params']
+α,w_star,θ,β_eff = best_de['params']
 
 post_gmm = {
-    'production': 'nested_ces',
     'parameters': {
         'σ': pre_gmm_params['parameters']['σ'],
         'δ': pre_gmm_params['parameters']['δ'],
-        'ϱ': pre_gmm_params['parameters']['ϱ'],
+        'ρ': pre_gmm_params['parameters']['ρ'],
         'σ_ϵ': pre_gmm_params['parameters']['σ_ϵ'],
-        'γ': float(γ),
+        'γ': pre_gmm_params['parameters']['γ'],
         'M': pre_gmm_params['parameters']['M'],
         'π_LL': pre_gmm_params['parameters']['π_LL'],
         'π_HH': pre_gmm_params['parameters']['π_HH'],
-        'α': pre_gmm_params['parameters']['α'],
-        'ψ': pre_gmm_params['parameters']['ψ'],
-        'χ': pre_gmm_params['parameters']['χ'],
+        'α': float(α),
         'w_star': float(w_star),
         'θ': float(θ),
         'β_eff': float(β_eff),
@@ -100,7 +87,7 @@ post_gmm = {
     }
 }
 
-with open(DATA_PARAMS / 'post_gmm_params_ces.json','w',encoding='utf-8') as f:
+with open(DATA_PARAMS / 'post_gmm_params.json','w',encoding='utf-8') as f:
     json.dump(post_gmm,f,indent=4,ensure_ascii=False)
 
-print(f"Saved post_gmm_params_ces.json")
+print(f"Saved post_gmm_params.json")

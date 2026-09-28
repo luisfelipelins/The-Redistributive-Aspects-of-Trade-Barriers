@@ -1,0 +1,14 @@
+# Python 3.10.9; versions from pip list in C:/Users/lfval/anaconda3 (2026-09-28).
+# Numerical model, estimation and charts
+numpy==1.26.4
+pandas==2.2.3
+scipy==1.11.4
+numba==0.59.1
+matplotlib==3.10.8
+seaborn==0.13.2
+
+# Data sources, Excel input and LaTeX tables
+fredapi==0.5.2
+requests==2.32.4
+openpyxl==3.1.0
+Jinja2==3.1.3

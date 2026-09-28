@@ -58,7 +58,8 @@ ModelPar = TypeModelParameters(
 data_moments = {
     'skill_premium': pre_gmm['moments']['skill_premium'],
     'w_to_wstar': pre_gmm['moments']['w_to_wstar'],
-    'I': pre_gmm['moments']['I']}
+    'I': pre_gmm['moments']['I'],
+    'low_skill_share': pre_gmm['moments']['LS_share']}
 
 estimated_values: np.ndarray = np.array([p[name] for name in PARAM_NAMES])
 param_names : list       = PARAM_NAMES
@@ -73,7 +74,7 @@ h = 1e-3  # Perturbations must exceed equilibrium-solver noise.
 ### --- Jorgensen (2023) Sensitivity of Estimated Parameters to Calibrated Parameters --- ###
 #############################################################################################
 
-calibrated_names  = ['σ','δ','ϱ','σ_ϵ','α','γ','ψ','χ','M','π_LL','π_HH']
+calibrated_names  = ['σ','δ','ϱ','σ_ϵ','α','ψ','χ','M','π_LL','π_HH']
 calibrated_values = np.array([p[k] for k in calibrated_names])
 calibrated_base   = {k: p[k] for k in calibrated_names}
 
@@ -94,7 +95,7 @@ def _make_model_par(gv: dict) -> TypeModelParameters:
     """
 
     return TypeModelParameters(α            = gv['α'],
-                               γ            = gv['γ'],
+                               γ            = p['γ'],
                                ψ            = gv['ψ'],
                                χ            = gv['χ'],
                                β_eff        = np.nan,
@@ -162,11 +163,10 @@ plt.savefig(OUTPUTS_GMM / 'jorgensenelasticity.pdf')
 plt.close()
 
 ######################################################################
-### --- Checking narrative-hold regions given sensitivity of γ --- ###
+### --- Narrative-hold regions under partial changes in estimated γ --- ###
 ######################################################################
 
 gamma_p_base = p['γ']
-idx_gamma_p  = calibrated_names.index('γ')
 idx_theta    = param_names.index('θ')
 theta_grid   = np.linspace(0.5,27,600)
 I_grid       = np.linspace(0.01,0.99,600)
@@ -181,8 +181,10 @@ for filename,selected in [('sensboundaries.pdf',scenarios),('sensboundaries_base
     handles = []
 
     for gamma_value,color in selected:
+        if not 0 < gamma_value < 1:
+            continue
         par   = replace(ModelPar,γ=gamma_value)
-        theta = estimated_values[idx_theta] + S_hat[idx_theta,idx_gamma_p] * (gamma_value - gamma_p_base)
+        theta = estimated_values[idx_theta]  # Hold other estimates fixed in these scenarios.
         shares = [firm_at_interest(I,r_rep,skill_dist[1],skill_dist[0],par) for I in I_grid]
         omega_L = np.array([sol['omega_L'] for sol in shares])
         omega_X = np.array([sol['omega_X'] for sol in shares])

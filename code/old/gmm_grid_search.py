@@ -21,10 +21,11 @@ rerun_estimation = False   # True -> re-run even if grid_search.csv already exis
 θ_vec                  = [1,5,10,15,20,25,30,35]
 w_star_vec             = [0.1,0.2,0.3,0.4,0.5,0.6]
 β_eff_vec : np.ndarray = np.linspace(1.0,7.0,9)
+γ_vec                  = [0.25,0.4,0.55,0.7,0.85]
 
-RESULTS_FILE = DATA_INT / 'grid_search_nested_ces.csv'
+RESULTS_FILE = DATA_INT / 'grid_search_nested_ces_gamma.csv'
 
-params = ['θ','w_star','β_eff']
+params = ['θ','w_star','β_eff','γ']
 
 ##########################
 ### --- Estimation --- ###
@@ -50,20 +51,20 @@ if rerun_estimation or not RESULTS_FILE.exists():
                                    outer_loop_eps   = 1e-7,
                                    outer_loop_r_lb  = 0.001)
 
-    combos = list(product(θ_vec,w_star_vec,β_eff_vec))
+    combos = list(product(θ_vec,w_star_vec,β_eff_vec,γ_vec))
     total  = len(combos)
 
-    print(f"Running {total} combinations " f"({len(θ_vec)}θ × {len(w_star_vec)}w* × {len(β_eff_vec)}β_eff) ...")
+    print(f"Running {total} combinations " f"({len(θ_vec)}θ × {len(w_star_vec)}w* × {len(β_eff_vec)}β_eff × {len(γ_vec)}γ) ...")
 
     rows = []
     n_ok = 0
 
-    for i,(θ,w_star,β_eff) in enumerate(combos,1):
-        row = {'θ': θ,'w_star': w_star,'β_eff': β_eff,'converged': 0}
+    for i,(θ,w_star,β_eff,γ) in enumerate(combos,1):
+        row = {'θ': θ,'w_star': w_star,'β_eff': β_eff,'γ': γ,'converged': 0}
 
         try:
             ModelPar = TypeModelParameters(α            = calib['α'],
-                                           γ            = calib['γ'],
+                                           γ            = γ,
                                            ψ            = calib['ψ'],
                                            χ            = calib['χ'],
                                            β_eff        = β_eff,
@@ -102,7 +103,7 @@ if rerun_estimation or not RESULTS_FILE.exists():
             })
             n_ok += 1
         except Exception as e:
-            print(f"  [{i:4d}/{total}] failed." f"θ={θ:2g}, w*={w_star}, β_eff={β_eff}: {e}")
+            print(f"  [{i:4d}/{total}] failed." f"θ={θ:2g}, w*={w_star}, β_eff={β_eff}, γ={γ}: {e}")
 
         rows.append(row)
 
@@ -128,7 +129,7 @@ conv_df = results_df[results_df['converged'] == 1].copy()
 ###################################
 ### --- Sensitivity Heatmap --- ###
 ###################################
-moments = ['high_skill_share','skill_premium','w_to_wstar','I']
+moments = ['low_skill_share','skill_premium','w_to_wstar','I']
 
 sens = pd.DataFrame(index=params,columns=moments,dtype=float)
 
@@ -151,14 +152,14 @@ plt.close()
 ##########################################
 ### --- Achieveble Moments Boxplot --- ###
 ##########################################
-moments = ['high_skill_share','skill_premium','w_to_wstar','I']
+moments = ['low_skill_share','skill_premium','w_to_wstar','I']
 
 conv_df = conv_df.loc[conv_df['skill_premium'] < 10]
 conv_df = conv_df.loc[conv_df['w_to_wstar'] < 10]
 
 fig,ax = plt.subplots(nrows=2,ncols=2,figsize=(10,5))
 
-for n,c,cn in zip(moments,[(0,0),(0,1),(1,0),(1,1),(0,2),(1,2)],['H-skill Inc. Share','Skill Premium',r'$w$ to $w^*$','Task-offshore Share','Capital to output ratio','Income Gini']):
+for n,c,cn in zip(moments,[(0,0),(0,1),(1,0),(1,1),(0,2),(1,2)],['L-skill Inc. Share','Skill Premium',r'$w$ to $w^*$','Task-offshore Share','Capital to output ratio','Income Gini']):
     ax[c].boxplot(x=conv_df[n])
     ax[c].set_xlabel(cn)
 
@@ -170,7 +171,7 @@ plt.close()
 ### --- Main Effects Grid --- ###
 #################################
 
-moments = ['high_skill_share','skill_premium','w_to_wstar','I']
+moments = ['low_skill_share','skill_premium','w_to_wstar','I']
 
 moments_norm = conv_df.copy()
 

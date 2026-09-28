@@ -14,7 +14,6 @@ import io
 α                   = 0.81  # Capital weight in HK (Carroll & Hur, 2023)
 ψ                   = 0.40  # Outer CES curvature (Carroll & Hur, 2023)
 χ                   = -0.49  # Inner CES curvature (Carroll & Hur, 2023)
-γ                   = 0.55  # (Carroll & Hur, 2023)
 M                   = 1
 τ           : float = 0.024
 ξ           : float = 0.0
@@ -70,10 +69,10 @@ k_stock  = fred.get_series('RKNANPUSA666NRUG').loc['2019-01-01']
 gdp      = fred.get_series('RGDPNAUSA666NRUG').loc['2019-01-01']
 k_to_Y   = k_stock / gdp
 
-# High-skill Share (Own Calculation)
-H_to_L   = skill_premium * ((1 - ls_emp_share) / ls_emp_share)
+# Low-skill Share (Own Calculation)
+H_to_L               = skill_premium * ((1 - ls_emp_share) / ls_emp_share)
 capital_income_share = 0.36  # Data benchmark, not a CES weight
-HS_share = (1 - capital_income_share) * (H_to_L / (1 + H_to_L))
+LS_share             = (1 - capital_income_share) / (1 + H_to_L)
 
 # Low-skilled Tasks Offshoring Share (TiVA-OECD)
 tiva_link = ('https://sdmx.oecd.org/sti-public/rest/data/'
@@ -130,9 +129,9 @@ row = (data['Wage'] * (data['Value Added'] / data['Value Added'].sum())).sum()
 w_to_wstar = us / row
 
 ### --- Saving to pre-GMM parameters --- ###
-parameters = {'σ': σ,'δ': δ,'ϱ': ϱ,'σ_ϵ': σ_ϵ,'α': α,'γ': γ,'ψ': ψ,'χ': χ,'M': M,'π_LL': π_LL,'π_HH': π_HH,
+parameters = {'σ': σ,'δ': δ,'ϱ': ϱ,'σ_ϵ': σ_ϵ,'α': α,'ψ': ψ,'χ': χ,'M': M,'π_LL': π_LL,'π_HH': π_HH,
               'τ': τ,'ξ': ξ,'rebate_share': rebate_share}
-moments = {'skill_premium': skill_premium,'K/Y': k_to_Y,'HS_share': HS_share,'capital_income_share': capital_income_share,'I': I,'w_to_wstar': w_to_wstar}
+moments = {'skill_premium': skill_premium,'K/Y': k_to_Y,'LS_share': LS_share,'capital_income_share': capital_income_share,'I': I,'w_to_wstar': w_to_wstar}
 
 save_dict = {'production': 'nested_ces','parameters': parameters,'moments': moments}
 
