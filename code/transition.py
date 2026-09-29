@@ -12,7 +12,6 @@ import scipy.stats
 import numpy as np
 import copy
 import json
-from dataclasses import replace
 
 # Creating the baseline model
 
@@ -27,7 +26,7 @@ CalibPar = TypeCalibParameters(
     rh_c             = 0,
     vfi_lb           = 0,
     vfi_ubmul        = 60,
-    vfi_N            = 500,
+    vfi_N            = 2000,
     vfi_eps          = 1e-5,
     vfi_howard_steps = 20,
     gmc_eps          = 1e-3,
@@ -91,9 +90,9 @@ T1_model = GeneralEquilibriumModel(T1_ModelPar,CalibPar,log_dir=None,log_inner=F
 T1_model.outer_loop_solver()
 T1_stats = T1_model.economy_statistics()
 
-########################################
+####################################################
 ### Section A - Transition between Steady-States ###
-########################################
+####################################################
 
 T      = 350
 τ_path = np.full(T + 1,τ_1)
@@ -379,241 +378,3 @@ print('\nMean welfare V by skill type, change from pre-shock (+ is better off)')
 
 for key,label in [('V_low_skill','Low-skill'),('V_high_skill','High-skill')]:
     print(f'  {label:<11} impact {-100*(stats[key][0]/pre_shock[key]-1):+.4f}%, ' f't={T} {-100*(stats[key][-1]/pre_shock[key]-1):+.4f}%')
-
-
-########################################################################
-### Section B - Condorcet Voting with Transition Utility at t=0 ###
-########################################################################
-
-τ_grid: np.ndarray = 0.75 * np.linspace(0,1,100) ** 2
-preference_tariffs: np.ndarray = np.unique(np.r_[τ_grid,τ_0,τ_1])
-terminal_models: dict = {τ_0: T0_model,τ_1: T1_model}
-failed_tariffs : dict = {}
-
-# Preparing terminal economies
-
-for tariff in preference_tariffs:
-    if tariff in terminal_models:
-        continue
-
-    print(f'Preparing terminal economy: tariff {tariff:.4%}')
-
-    try:
-        terminal_parameters = replace(T0_ModelPar,τ=float(tariff))
-        terminal_model = GeneralEquilibriumModel(terminal_parameters,CalibPar,log_dir=None,log_inner=False)
-        terminal_model.outer_loop_solver()
-        terminal_models[tariff] = terminal_model
-
-    except (RuntimeError,ValueError,FloatingPointError) as error:
-        failed_tariffs[tariff] = f'Terminal economy: {error}'
-
-        print(f'Skipping tariff {tariff:.4%}: {error}')
-
-
-# Use one asset grid and baseline electorate for every tariff.
-
-election_assets = np.array(functions_transition.build_common_asset_grid(list(terminal_models.values()),CalibPar))
-election_E0 = functions_transition.tighten_steady_state(T0_model,election_assets,state_grid,joint_trans)
-transition_state_values: np.ndarray = np.full((election_E0['V'].size,len(preference_tariffs)),np.nan)
-transition_diagnostics: dict = {}
-
-for tariff_idx,tariff in enumerate(preference_tariffs):
-    if tariff == τ_0:
-        transition_state_values[:,tariff_idx] = election_E0['V'].ravel()
-        continue
-
-    if tariff in failed_tariffs:
-        continue
-
-    print(f'Solving voting transition {tariff_idx + 1}/{len(preference_tariffs)}: tariff {tariff:.4%}')
-
-    try:
-        terminal_model = terminal_models[tariff]
-        election_E1 = functions_transition.tighten_steady_state(terminal_model,election_assets,state_grid,joint_trans)
-        candidate_path = np.full(T + 1,tariff)
-
-        candidate_transition = functions_transition.solve_transition_path(
-            K_0         = election_E0['K'],
-            τ_path      = candidate_path,
-            H           = T0_model.H,
-            L           = T0_model.L,
-            state_probs = T0_model.state_probs,
-            V_terminal  = election_E1['V'],
-            dens_0      = election_E0['dens'],
-            a_arr       = election_assets,
-            state_grid  = state_grid,
-            joint_trans = joint_trans,
-            ModelPar    = terminal_model.ModelPar,
-            K_terminal  = election_E1['K'],
-            damp        = 0.3,
-            store_paths = False)
-
-        transition_diagnostics[tariff] = {key: candidate_transition[key] for key in ('converged','residual','n_iter','stop_reason')}
-
-        if not candidate_transition['converged']:
-            raise RuntimeError(f'Transition at tariff {tariff:.4%} did not converge; see transition_diagnostics.')
-
-        candidate_values = candidate_transition['V_0'].ravel()
-
-        if not np.all(np.isfinite(candidate_values)):
-            raise ValueError('Non-finite t=0 utility.')
-
-        transition_state_values[:,tariff_idx] = candidate_values
-
-        del candidate_transition,candidate_values,election_E1,candidate_path
-
-    except (RuntimeError,ValueError,FloatingPointError) as error:
-        failed_tariffs[tariff] = f'Transition: {error}'
-
-        print(f'Skipping tariff {tariff:.4%}: {error}')
-
-
-successful_tariffs: np.ndarray = np.all(np.isfinite(transition_state_values),axis=0)
-
-transition_state_values = transition_state_values[:,successful_tariffs]
-preference_tariffs     = preference_tariffs[successful_tariffs]
-
-print(f'Voting over {len(preference_tariffs)} successfully solved tariffs; {len(failed_tariffs)} candidates excluded.')
-
-if len(preference_tariffs) < 2:
-    raise RuntimeError('At least two successful candidates are needed for a Condorcet comparison.')
-
-### --- Condorcet Winner under Baseline Population Voting --- ###
-
-voter_values : np.ndarray = transition_state_values
-voter_weights: np.ndarray = election_E0['dens'].ravel() / election_E0['dens'].sum()
-tariff_count : int        = len(preference_tariffs)
-support      : np.ndarray = np.zeros((tariff_count,tariff_count))
-
-# Entry (i,j) is the population share strictly preferring tariff i to tariff j.
-
-for i in range(tariff_count):
-    for j in range(i + 1,tariff_count):
-        support[i,j] = voter_weights[voter_values[:,i] > voter_values[:,j]].sum()
-        support[j,i] = voter_weights[voter_values[:,j] > voter_values[:,i]].sum()
-
-pairwise_support: pd.DataFrame = pd.DataFrame(support,index=preference_tariffs,columns=preference_tariffs)
-
-pairwise_support.index.name   = 'candidate_tariff'
-pairwise_support.columns.name = 'opponent_tariff'
-
-pairwise_indifference: pd.DataFrame = 1 - pairwise_support - pairwise_support.T
-pairwise_margins     : pd.DataFrame = pairwise_support - pairwise_support.T
-
-# Indifferent households abstain. Treat vote margins within rounding error as ties.
-
-vote_tolerance   : float        = 1e-12
-pairwise_wins    : np.ndarray   = pairwise_margins.to_numpy() > vote_tolerance
-win_counts       : np.ndarray   = pairwise_wins.sum(axis=1)
-loss_counts      : np.ndarray   = pairwise_wins.sum(axis=0)
-condorcet_winners: np.ndarray   = preference_tariffs[win_counts == tariff_count - 1]
-condorcet_summary: pd.DataFrame = pd.DataFrame(index=pd.Index(preference_tariffs,name='tariff'))
-
-condorcet_summary['wins']   = win_counts
-condorcet_summary['losses'] = loss_counts
-condorcet_summary['ties']   = tariff_count - 1 - win_counts - loss_counts
-
-print('\nCondorcet election among successful candidates: t=0 utilities, fixed baseline electorate; exact utility ties abstain.')
-
-if condorcet_winners.size:
-    for tariff in condorcet_winners:
-        winning_margins = pairwise_margins.loc[tariff].drop(tariff)
-        closest_margin  = winning_margins.min()
-
-        print(f'Condorcet winner: {tariff:.4%}; smallest head-to-head winning margin: {closest_margin:.4%} of covered households.')
-
-        del winning_margins,closest_margin
-else:
-    print('No strict Condorcet winner on the evaluated tariff grid. Inspect condorcet_summary and pairwise_margins for defeats and ties.')
-
-del voter_values,voter_weights,tariff_count,support,pairwise_wins,win_counts,loss_counts
-
-
-### --- Median Preferred Tariff --- ###
-
-preference_values : np.ndarray  = transition_state_values
-preference_states: pd.DataFrame = pd.DataFrame({
-    'skill_type': np.repeat([state[0] for state in state_grid],len(election_assets)),
-    'z': np.repeat(np.exp([state[1] for state in state_grid]),len(election_assets)),
-    'a_0': np.tile(election_assets,len(state_grid)),
-    'dens': election_E0['dens'].ravel()})
-peak_indices: np.ndarray = np.argmax(preference_values,axis=1)
-covered_mass: float      = float(preference_states['dens'].sum())
-
-# Exact utility ties select the lower tariff; the median weights households by baseline mass.
-preference_states['preferred_tariff'] = preference_tariffs[peak_indices]
-
-preferred_tariff_distribution: pd.Series = preference_states.groupby('preferred_tariff')['dens'].sum() / covered_mass
-preference_cdf               : pd.Series = preferred_tariff_distribution.cumsum()
-median_index                : int       = int(np.searchsorted(preference_cdf.to_numpy(),0.5))
-median_preferred_tariff      : float     = float(preference_cdf.index[median_index])
-coverage_share              : float     = covered_mass / election_E0['dens'].sum()
-
-median_rows = [
-    ['Median preferred tariff',f'{median_preferred_tariff:.4%}'.replace('%',r'\%')],
-    ['Baseline population covered',f'{coverage_share:.4%}'.replace('%',r'\%')],
-    ['Lowest evaluated tariff',f'{preference_tariffs.min():.2%}'.replace('%',r'\%')],
-    ['Highest evaluated tariff',f'{preference_tariffs.max():.2%}'.replace('%',r'\%')]]
-median_rows += [['Successful candidate tariffs',str(len(preference_tariffs))],['Excluded candidate tariffs',str(len(failed_tariffs))]]
-median_summary = pd.DataFrame(median_rows,columns=['Statistic','Value'])
-median_table   = median_summary.to_latex(
-    index   = False,
-    escape  = False,
-    caption = 'Median preferred tariff at t=0 among successful transitions, weighted by baseline population',
-    label   = 'tab:transition_median_preferred_tariff')
-
-with open(OUTPUTS_QUANT_EX / 'sec_B_transition_median_preferred_tariff.tex','w',encoding='utf-8') as f:
-    f.write(median_table)
-
-print(f'Median preferred tariff at t=0 among successful candidates: {median_preferred_tariff:.4%}; baseline population covered: {coverage_share:.4%}.')
-
-del median_index,median_rows,median_summary,median_table
-
-### --- Utility Profiles and Single-Peakedness --- ###
-
-utility_steps : np.ndarray = np.diff(preference_values,axis=1)
-left_of_peak : np.ndarray = np.arange(utility_steps.shape[1])[None,:] < peak_indices[:,None]
-single_peaked: np.ndarray = np.all(np.where(left_of_peak,utility_steps > 0,utility_steps < 0),axis=1)
-peak_values  : np.ndarray = preference_values[np.arange(len(peak_indices)),peak_indices]
-
-# A positive state-specific scale preserves rankings and makes utility gaps comparable visually.
-if np.any(peak_values == 0):
-    raise ValueError('Utility profiles cannot be normalized by zero peak utility.')
-
-utility_profiles: np.ndarray = (preference_values - peak_values[:,None]) / np.abs(peak_values[:,None])
-wrong_way_steps : np.ndarray = np.where(left_of_peak,-utility_steps,utility_steps)
-largest_reversal: np.ndarray = np.maximum(wrong_way_steps.max(axis=1),0) / np.abs(peak_values)
-
-preference_states['strictly_single_peaked'] = single_peaked
-preference_states['largest_reversal']      = largest_reversal
-
-single_peaked_share: float = float(preference_states['dens'].to_numpy() @ single_peaked / covered_mass)
-
-print(f'Strictly single-peaked: {single_peaked.mean():.2%} of covered states; {single_peaked_share:.2%} of covered households.')
-print(f'Largest adjacent wrong-way utility change: {largest_reversal.max():.4%} of the corresponding state\'s absolute peak utility.')
-
-# Every covered state is plotted, including zero-mass states. Ties fail the strict test.
-fig,ax = plt.subplots(nrows=2,ncols=2,figsize=(12,8),sharex=True,sharey=True,layout='constrained')
-
-for col,(skill,title) in enumerate([('L','Low-skill'),('H','High-skill')]):
-    for row,(passes,label,color) in enumerate([(True,'Single-peaked','#1baf7a'),(False,'Not single-peaked','#e34948')]):
-        selected = (preference_states['skill_type'].to_numpy() == skill) & (single_peaked == passes)
-        axis     = ax[row,col]
-        opacity  = float(np.clip(3 / np.sqrt(max(selected.sum(),1)),0.08,0.85))
-
-        axis.plot(preference_tariffs,utility_profiles[selected].T,color=color,linewidth=0.6,alpha=opacity,rasterized=True)
-        axis.axhline(0,color='black',linestyle=':',linewidth=1)
-        axis.set_title(f'{title}: {label} ({selected.sum():,} states)',fontsize=12)
-        axis.xaxis.set_major_formatter(mtick.PercentFormatter(xmax=1))
-        axis.yaxis.set_major_formatter(mtick.PercentFormatter(xmax=1))
-        axis.tick_params(labelsize=11)
-        axis.set_axisbelow(True)
-        axis.grid(linestyle='--',alpha=0.3)
-
-        if not selected.any():
-            axis.text(0.5,0.5,'No states',transform=axis.transAxes,ha='center',va='center',fontsize=12)
-
-fig.supxlabel(r'Tariff rate ($\tau$)',fontsize=12)
-fig.supylabel('t=0 utility gap relative to each state\'s absolute peak utility',fontsize=12)
-fig.savefig(OUTPUTS_QUANT_EX / 'sec_B_transition_utility_profiles.pdf')
-plt.close(fig)

@@ -68,7 +68,7 @@ moment_names             = MOMENT_NAMES
 log_dir = LOG_GMM / 'jacobian_ces'
 log_dir.mkdir(exist_ok=True)
 
-h = 1e-3  # Perturbations must exceed equilibrium-solver noise.
+h = 1e-6  # Perturbations must exceed equilibrium-solver noise.
 
 #############################################################################################
 ### --- Jorgensen (2023) Sensitivity of Estimated Parameters to Calibrated Parameters --- ###

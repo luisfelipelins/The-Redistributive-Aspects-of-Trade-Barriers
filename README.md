@@ -81,7 +81,7 @@ requirements.txt       Exact versions of project dependencies
 | [`functions.py`](code/functions.py) | Provides productivity and skill processes, household value-function iteration, stationary distributions, offshoring and transfer calculations, and inequality measures. |
 | [`functions_transition.py`](code/functions_transition.py) | Solves production along a capital path, household decisions backward, and distributions forward; updates the transition path. |
 | [`gmm_jorgensen_sensitivity.py`](code/gmm_jorgensen_sensitivity.py) | Computes local sensitivity of the four estimates to calibrated parameters and plots representative-agent narrative conditions. |
-| [`quant_exercises.py`](code/quant_exercises.py) | Runs stationary tariff and redistribution counterfactuals, welfare decompositions, social-weight exercises, and household tariff-preference comparisons. |
+| [`quant_exercises.py`](code/quant_exercises.py) | Runs stationary tariff and redistribution counterfactuals, welfare decompositions, and social-weight exercises. |
 | [`transition.py`](code/transition.py) | Runs transition-path exercises and produces aggregate, inequality, and welfare results. |
 | [`test_nested_ces.py`](code/test_nested_ces.py) | Checks production identities, equilibrium consistency, welfare decompositions, and GMM parameter/moment handling without running a full estimation. |
 

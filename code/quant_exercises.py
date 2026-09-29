@@ -32,7 +32,7 @@ CalibPar = TypeCalibParameters(
     rh_c             = 0,
     vfi_lb           = 0,
     vfi_ubmul        = 60,
-    vfi_N            = 500,
+    vfi_N            = 2000,
     vfi_eps          = 1e-5,
     vfi_howard_steps = 20,
     gmc_eps          = 1e-3,
@@ -795,6 +795,7 @@ def solve_shocked_model(τ: float,warm_start_model: GeneralEquilibriumModel,ξ: 
 
 
 tariff_menu    : dict                    = {}
+failed_tariffs : dict                    = {}
 prev_model     : GeneralEquilibriumModel = T0_model
 tariff_progress: str                     = ''
 
@@ -804,11 +805,21 @@ try:
 
         print(f'\r{tariff_progress}',end='',flush=True)
 
-        model          = solve_shocked_model(τ,warm_start_model=prev_model)
+        try:
+            model = solve_shocked_model(τ,warm_start_model=prev_model)
+        except ValueError as error:
+            failed_tariffs[τ] = str(error)
+            print(f'\nSkipping tau = {τ:.2%}: {error}',flush=True)
+            continue
+
         tariff_menu[τ] = model
         prev_model     = model
 finally:
     print('\r' + ' ' * len(tariff_progress) + '\r',end='',flush=True)
+
+print(f'Tariff grid: {len(tariff_menu)} solved, {len(failed_tariffs)} skipped.')
+if failed_tariffs:
+    print('Curves and grid maxima use only converged tariffs; skipped points are excluded.')
 
 ### --- Tariff Laffer Curve --- ###
 
@@ -979,23 +990,26 @@ for ξ in sorted(ξ_grid,key=abs):
 
 redistribution_welfare = pd.DataFrame(redistribution_rows).set_index('ξ').sort_index()
 reference_welfare     = redistribution_welfare.loc[0,'mean_V']
-if not np.isfinite(reference_welfare):
-    raise ValueError('The ξ=0 reference equilibrium must converge to compare redistribution rules.')
-redistribution_welfare['welfare_change'] = (redistribution_welfare['mean_V'] - reference_welfare) / abs(reference_welfare)
-print(redistribution_welfare.to_string())
+redistribution_welfare['welfare_change'] = np.nan
+if not np.isfinite(reference_welfare) or reference_welfare == 0:
+    print('Skipping redistribution welfare chart: the ξ=0 reference is unavailable or zero.')
+    print(redistribution_welfare.to_string())
+else:
+    redistribution_welfare['welfare_change'] = (redistribution_welfare['mean_V'] - reference_welfare) / abs(reference_welfare)
+    print(redistribution_welfare.to_string())
 
-fig,ax = plt.subplots(figsize=(7,5))
-ax.plot(redistribution_welfare.index,redistribution_welfare['welfare_change'],color='#184f95',marker='o',label=f'Tariff: {τ_1:.1%}')
-ax.axhline(0,color='#777777',linestyle=':',linewidth=1)
-ax.axvline(0,color='#777777',linestyle=':',linewidth=1)
-ax.set_xlabel(r'Redistribution parameter ($\xi$; negative: regressive, positive: progressive)')
-ax.set_ylabel('Mean welfare change (% of |welfare at ξ = 0|)')
-ax.yaxis.set_major_formatter(mtick.PercentFormatter(xmax=1))
-ax.legend(loc=0)
-ax.grid(linestyle='--',alpha=0.5)
-fig.tight_layout()
-fig.savefig(OUTPUTS_QUANT_EX / 'sec_B_redistribution_welfare.pdf')
-plt.close(fig)
+    fig,ax = plt.subplots(figsize=(7,5))
+    ax.plot(redistribution_welfare.index,redistribution_welfare['welfare_change'],color='#184f95',marker='o',label=f'Tariff: {τ_1:.1%}')
+    ax.axhline(0,color='#777777',linestyle=':',linewidth=1)
+    ax.axvline(0,color='#777777',linestyle=':',linewidth=1)
+    ax.set_xlabel(r'Redistribution parameter ($\xi$; negative: regressive, positive: progressive)')
+    ax.set_ylabel('Mean welfare change (% of |welfare at ξ = 0|)')
+    ax.yaxis.set_major_formatter(mtick.PercentFormatter(xmax=1))
+    ax.legend(loc=0)
+    ax.grid(linestyle='--',alpha=0.5)
+    fig.tight_layout()
+    fig.savefig(OUTPUTS_QUANT_EX / 'sec_B_redistribution_welfare.pdf')
+    plt.close(fig)
 
 
 ### --- Social Welfare Weights by Stationary Income Decile --- ###
@@ -1032,47 +1046,45 @@ def stationary_decile_welfare(model: GeneralEquilibriumModel) -> np.ndarray:
 # Ranks are recomputed in each stationary economy; the social weights stay fixed.
 welfare_models: dict = {**tariff_menu,τ_0: T0_model,τ_1: T1_model}
 if any(not np.isfinite(model.outer_res.fun) or model.outer_res.fun > CalibPar.outer_loop_eps for model in welfare_models.values()):
-    raise ValueError('All tariff equilibria must converge before optimizing social weights.')
+    raise ValueError('All tariff equilibria must converge before comparing weighted welfare.')
 decile_values: pd.DataFrame = pd.DataFrame({τ: stationary_decile_welfare(model) for τ,model in welfare_models.items()},index=pd.Index(range(1,11),name='income_decile')).T.sort_index()
 decile_values.index.name = 'tariff'
 decile_delta: np.ndarray = (decile_values.loc[τ_1] - decile_values.loc[τ_0]).to_numpy()
 decile_rank : np.ndarray = np.linspace(0,1,10)
 
-def optimal_social_eta(values: np.ndarray,target: int) -> float:
+def neutral_social_eta(delta: np.ndarray) -> float:
     """
-    Find the smallest pro-poor exponential tilt making the target a grid maximum.
+    Find the smallest nonnegative exponential tilt that equalizes welfare.
 
     Parameters
     ----------
-    values : numpy.ndarray
-        Tariff-by-decile stationary utility matrix, ordered poorest to richest.
-    target : int
-        Row of the implemented tariff.
+    delta : numpy.ndarray
+        Implemented-tariff minus baseline mean utility by income decile.
 
     Returns
     -------
     float
-        Minimum finite eta, or NaN if no such weighting exists.
+        Minimum finite pro-poor tilt, or NaN if no such weights exist.
     """
-    if not np.all(np.isfinite(values)):
-        raise ValueError('Social-weight optimization requires finite welfare values.')
-    differences  = values[target] - values
-    scales       = np.max(np.abs(differences),axis=1)
-    coefficients = differences[scales > 0] / scales[scales > 0,None]
-    boundaries   = [1.0]
-    for row in coefficients:
-        roots = np.polynomial.polynomial.polyroots(row)
-        boundaries.extend(root.real for root in roots if abs(root.imag) < 1e-8 and 0 < root.real <= 1)
-    # Every inequality changes sign only at a root. The largest feasible t
-    # corresponds to the smallest eta; t=0 would require infinite tilt.
-    for t in sorted(boundaries,reverse=True):
-        gaps = np.polynomial.polynomial.polyval(t,coefficients.T)
-        if np.all(gaps >= -1e-10):
-            return float(-(values.shape[1] - 1) * np.log(t))
+    if not np.all(np.isfinite(delta)):
+        raise ValueError('Social-weight neutrality requires finite welfare values.')
+    scale = np.max(np.abs(delta))
+    if scale == 0:
+        return 0.0
+    coefficients = delta / scale
+    if abs(coefficients.sum()) <= 1e-10:
+        return 0.0
+    # t = exp(-eta / (n - 1)); t=0 would require an infinite tilt.
+    roots = np.polynomial.polynomial.polyroots(coefficients)
+    candidates = [min(root.real,1.0) for root in roots
+                  if abs(root.imag) < 1e-8 and 0 < root.real <= 1 + 1e-10]
+    for t in sorted(candidates,reverse=True):
+        if abs(np.polynomial.polynomial.polyval(t,coefficients)) <= 1e-8:
+            return float(-(len(delta) - 1) * np.log(t))
     return np.nan
 
 
-optimal_eta = optimal_social_eta(decile_values.to_numpy(),decile_values.index.get_loc(τ_1))
+neutral_eta = neutral_social_eta(decile_delta)
 
 equal_welfare: pd.Series = decile_values.mean(axis=1)
 equal_change : pd.Series = (equal_welfare - equal_welfare.loc[τ_0]) / abs(equal_welfare.loc[τ_0])
@@ -1081,10 +1093,10 @@ print(f'Equal-weight stationary welfare change in section A: {equal_change.loc[�
 
 welfare_weights    = None
 welfare_comparison = None
-if not np.isfinite(optimal_eta):
-    print('No finite pro-poor exponential decile weighting makes section A optimal on the evaluated tariff grid.')
+if not np.isfinite(neutral_eta):
+    print('No finite pro-poor exponential decile weighting equalizes implemented-tariff and baseline welfare.')
     fig,ax = plt.subplots(ncols=2,figsize=(13,5.5),gridspec_kw={'width_ratios': [1,1.65]},layout='constrained')
-    ax[0].text(0.5,0.5,'No feasible finite pro-poor weights\nmake the implemented tariff a grid maximum.',ha='center',va='center',transform=ax[0].transAxes)
+    ax[0].text(0.5,0.5,'No feasible finite pro-poor weights\nequalize implemented-tariff and baseline welfare.',ha='center',va='center',transform=ax[0].transAxes)
     ax[0].set_axis_off()
     ax[1].plot(equal_change.index,equal_change,color='#184f95',label='Equal weights')
     ax[1].axvline(τ_1,color='#B23A48',linestyle='--')
@@ -1098,20 +1110,19 @@ if not np.isfinite(optimal_eta):
     fig.savefig(OUTPUTS_QUANT_EX / 'sec_B_weighted_welfare.pdf')
     plt.close(fig)
 else:
-    social_weights: np.ndarray = np.exp(-optimal_eta * decile_rank)
+    social_weights: np.ndarray = np.exp(-neutral_eta * decile_rank)
     social_weights             = social_weights / social_weights.mean()
     weighted_welfare: pd.Series = decile_values @ social_weights / 10
     weighted_change : pd.Series = (weighted_welfare - weighted_welfare.loc[τ_0]) / abs(weighted_welfare.loc[τ_0])
 
-    optimality_gap = weighted_welfare.max() - weighted_welfare.loc[τ_1]
-    if optimality_gap > 1e-8 * max(1,abs(weighted_welfare.loc[τ_1])):
-        raise ValueError('The implemented tariff does not maximize weighted welfare on the grid.')
+    neutrality_gap = weighted_welfare.loc[τ_1] - weighted_welfare.loc[τ_0]
+    if abs(neutrality_gap) > 1e-8 * max(1,abs(weighted_welfare.loc[τ_0])):
+        raise ValueError('Weighted welfare at the implemented tariff differs from baseline.')
 
-
-    welfare_optimal_tariff: float = float(τ_1)  # Select the implemented tariff when maxima tie.
+    welfare_optimal_tariff: float = float(weighted_welfare.idxmax())
     welfare_weights: pd.DataFrame = pd.DataFrame({
         'equal_weight': np.ones(10),
-        'optimal_weight': social_weights,
+        'neutral_weight': social_weights,
         'social_weight_share': social_weights / 10,
         'T0_mean_V': decile_values.loc[τ_0].to_numpy(),
         'T1_mean_V': decile_values.loc[τ_1].to_numpy(),
@@ -1119,15 +1130,16 @@ else:
     },index=pd.Index(range(1,11),name='income_decile'))
     welfare_comparison: pd.DataFrame = pd.DataFrame({
         'equal_welfare': equal_welfare,
-        'optimal_weight_welfare': weighted_welfare,
+        'neutral_weight_welfare': weighted_welfare,
         'equal_change': equal_change,
-        'optimal_weight_change': weighted_change,
+        'neutral_weight_change': weighted_change,
     })
 
-    print(f'Optimality eta: {optimal_eta:.6f}; bottom/top decile weight ratio: '
-          f'{np.exp(optimal_eta):.4f}; poorest 50% social weight: {social_weights[:5].sum() / 10:.2%}')
+    print(f'Neutrality eta: {neutral_eta:.6f}; bottom/top decile weight ratio: '
+          f'{np.exp(neutral_eta):.4f}; poorest 50% social weight: {social_weights[:5].sum() / 10:.2%}')
+    print(f'Implemented tariff: {τ_1:.2%}; weighted welfare change: {weighted_change.loc[τ_1]:+.4%}')
     print(f'Welfare-maximizing evaluated tariff: {welfare_optimal_tariff:.2%}; ' f'weighted welfare change: {weighted_change.loc[welfare_optimal_tariff]:+.4%}')
-    print(welfare_weights[['optimal_weight','social_weight_share']].to_string())
+    print(welfare_weights[['neutral_weight','social_weight_share']].to_string())
 
     # Map rank weights to baseline income, averaging weights at split decile boundaries.
 
@@ -1143,14 +1155,14 @@ else:
     fig,ax = plt.subplots(ncols=2,figsize=(13,5.5),gridspec_kw={'width_ratios': [1,1.65]},layout='constrained')
 
     ax[0].axhline(1,color='#898781',linestyle='--',linewidth=1.5,label='Equal weights')
-    ax[0].step(income_mass.index,income_weights,where='mid',color='#184f95',linewidth=1.5,label='Optimal-tariff weights')
+    ax[0].step(income_mass.index,income_weights,where='mid',color='#184f95',linewidth=1.5,label='Welfare-neutral weights')
     ax[0].set_xlabel('Baseline income (including transfers)')
     ax[0].set_ylabel('Social weight per household')
     ax[0].set_xlim(0,4.5)
     ax[0].legend(loc=0,fontsize=11)
 
     ax[1].plot(equal_change.index,equal_change,color='#898781',label='Equal weights')
-    ax[1].plot(weighted_change.index,weighted_change,color='#184f95',label='Optimal-tariff weights')
+    ax[1].plot(weighted_change.index,weighted_change,color='#184f95',label='Welfare-neutral weights')
     ax[1].axhline(0,color='black',linestyle=':',linewidth=1)
     ax[1].axvline(τ_0,color='black',linestyle=':',linewidth=1)
     ax[1].axvline(τ_1,color='#898781',linestyle='--',linewidth=1)
@@ -1189,158 +1201,3 @@ else:
     plt.close()
 
     plot_stationary_welfare(T0_model,welfare_models[welfare_optimal_tariff],'sec_B_optimal_welfare_state_space.pdf')
-
-### --- Household Values for Condorcet Voting --- ###
-# Compare tariffs at fixed baseline states.
-
-preference_models: dict = {**tariff_menu,τ_0: T0_model,τ_1: T1_model}
-preference_tariffs: np.ndarray = np.array(sorted(preference_models))
-preferred_tariffs: pd.DataFrame = T0_model.mod_res[['skill_type','z','a_0','dens']].copy().reset_index(drop=True)
-state_values: np.ndarray = np.full((len(preferred_tariffs),len(preference_tariffs)),np.nan)
-
-for tariff_idx,tariff in enumerate(preference_tariffs):
-    result = preference_models[tariff].mod_res
-
-    for (skill,z),states in preferred_tariffs.groupby(['skill_type','z']):
-        values = result.loc[(result['skill_type'] == skill) & (result['z'] == z)].sort_values('a_0')
-        value_interp = scipy.interpolate.interp1d(values['a_0'],values['V'],bounds_error=False,fill_value=np.nan)
-        state_values[states.index,tariff_idx] = value_interp(states['a_0'])
-
-        del value_interp
-
-# Restrict voting to common asset support; do not extrapolate.
-
-common_states: np.ndarray = np.all(np.isfinite(state_values),axis=1)
-covered_mass: float = preferred_tariffs.loc[common_states,'dens'].sum()
-
-if covered_mass <= 0:
-    raise ValueError('No baseline population mass lies within the common solved state space.')
-
-### --- Condorcet Winner under Baseline Population Voting --- ###
-
-voter_values : np.ndarray = state_values[common_states]
-voter_weights: np.ndarray = preferred_tariffs.loc[common_states,'dens'].to_numpy() / covered_mass
-tariff_count : int        = len(preference_tariffs)
-support      : np.ndarray = np.zeros((tariff_count,tariff_count))
-
-# Entry (i,j) is the population share strictly preferring tariff i to tariff j.
-
-for i in range(tariff_count):
-    for j in range(i + 1,tariff_count):
-        support[i,j] = voter_weights[voter_values[:,i] > voter_values[:,j]].sum()
-        support[j,i] = voter_weights[voter_values[:,j] > voter_values[:,i]].sum()
-
-pairwise_support: pd.DataFrame = pd.DataFrame(support,index=preference_tariffs,columns=preference_tariffs)
-
-pairwise_support.index.name   = 'candidate_tariff'
-pairwise_support.columns.name = 'opponent_tariff'
-
-pairwise_indifference: pd.DataFrame = 1 - pairwise_support - pairwise_support.T
-pairwise_margins     : pd.DataFrame = pairwise_support - pairwise_support.T
-
-# Indifferent households abstain. Treat vote margins within rounding error as ties.
-
-vote_tolerance   : float        = 1e-12
-pairwise_wins    : np.ndarray   = pairwise_margins.to_numpy() > vote_tolerance
-win_counts       : np.ndarray   = pairwise_wins.sum(axis=1)
-loss_counts      : np.ndarray   = pairwise_wins.sum(axis=0)
-condorcet_winners: np.ndarray   = preference_tariffs[win_counts == tariff_count - 1]
-condorcet_summary: pd.DataFrame = pd.DataFrame(index=pd.Index(preference_tariffs,name='tariff'))
-
-condorcet_summary['wins']   = win_counts
-condorcet_summary['losses'] = loss_counts
-condorcet_summary['ties']   = tariff_count - 1 - win_counts - loss_counts
-
-print('\nCondorcet election: fixed baseline electorate on common asset support; exact utility ties abstain.')
-
-if condorcet_winners.size:
-    for tariff in condorcet_winners:
-        winning_margins = pairwise_margins.loc[tariff].drop(tariff)
-        closest_margin  = winning_margins.min()
-
-        print(f'Condorcet winner: {tariff:.4%}; smallest head-to-head winning margin: {closest_margin:.4%} of covered households.')
-
-        del winning_margins,closest_margin
-else:
-    print('No strict Condorcet winner on the evaluated tariff grid. Inspect condorcet_summary and pairwise_margins for defeats and ties.')
-
-del voter_values,voter_weights,tariff_count,support,pairwise_wins,win_counts,loss_counts
-
-### --- Median Preferred Tariff --- ###
-
-preference_values : np.ndarray = state_values[common_states]
-preference_states: pd.DataFrame = preferred_tariffs.loc[common_states].copy()
-peak_indices     : np.ndarray = np.argmax(preference_values,axis=1)
-
-# Exact utility ties select the lower tariff; the median weights households by baseline mass.
-preference_states['preferred_tariff'] = preference_tariffs[peak_indices]
-
-preferred_tariff_distribution: pd.Series = preference_states.groupby('preferred_tariff')['dens'].sum() / covered_mass
-preference_cdf               : pd.Series = preferred_tariff_distribution.cumsum()
-median_index                : int       = int(np.searchsorted(preference_cdf.to_numpy(),0.5))
-median_preferred_tariff      : float     = float(preference_cdf.index[median_index])
-coverage_share              : float     = covered_mass / preferred_tariffs['dens'].sum()
-
-median_rows = [
-    ['Median preferred tariff',f'{median_preferred_tariff:.4%}'.replace('%',r'\%')],
-    ['Baseline population covered',f'{coverage_share:.4%}'.replace('%',r'\%')],
-    ['Lowest evaluated tariff',f'{preference_tariffs.min():.2%}'.replace('%',r'\%')],
-    ['Highest evaluated tariff',f'{preference_tariffs.max():.2%}'.replace('%',r'\%')]]
-median_tabular = _latex_tabular(['Statistic','Value'],[median_rows])
-median_table   = _latex_table([median_tabular],'Median preferred tariff under baseline population weights','tab:median_preferred_tariff')
-
-with open(OUTPUTS_QUANT_EX / 'sec_B_median_preferred_tariff.tex','w',encoding='utf-8') as f:
-    f.write(median_table)
-
-print(f'Median preferred tariff: {median_preferred_tariff:.4%}; baseline population covered: {coverage_share:.4%}.')
-
-del median_index,median_rows,median_tabular,median_table
-
-### --- Utility Profiles and Single-Peakedness --- ###
-
-utility_steps : np.ndarray = np.diff(preference_values,axis=1)
-left_of_peak : np.ndarray = np.arange(utility_steps.shape[1])[None,:] < peak_indices[:,None]
-single_peaked: np.ndarray = np.all(np.where(left_of_peak,utility_steps > 0,utility_steps < 0),axis=1)
-peak_values  : np.ndarray = preference_values[np.arange(len(peak_indices)),peak_indices]
-
-# A positive state-specific scale preserves rankings and makes utility gaps comparable visually.
-if np.any(peak_values == 0):
-    raise ValueError('Utility profiles cannot be normalized by zero peak utility.')
-
-utility_profiles: np.ndarray = (preference_values - peak_values[:,None]) / np.abs(peak_values[:,None])
-wrong_way_steps : np.ndarray = np.where(left_of_peak,-utility_steps,utility_steps)
-largest_reversal: np.ndarray = np.maximum(wrong_way_steps.max(axis=1),0) / np.abs(peak_values)
-
-preference_states['strictly_single_peaked'] = single_peaked
-preference_states['largest_reversal']      = largest_reversal
-
-single_peaked_share: float = float(preference_states['dens'].to_numpy() @ single_peaked / covered_mass)
-
-print(f'Strictly single-peaked: {single_peaked.mean():.2%} of covered states; {single_peaked_share:.2%} of covered households.')
-print(f'Largest adjacent wrong-way utility change: {largest_reversal.max():.4%} of the corresponding state\'s absolute peak utility.')
-
-# Every covered state is plotted, including zero-mass states. Ties fail the strict test.
-fig,ax = plt.subplots(nrows=2,ncols=2,figsize=(12,8),sharex=True,sharey=True,layout='constrained')
-
-for col,(skill,title) in enumerate([('L','Low-skill'),('H','High-skill')]):
-    for row,(passes,label,color) in enumerate([(True,'Single-peaked','#1baf7a'),(False,'Not single-peaked','#e34948')]):
-        selected = (preference_states['skill_type'].to_numpy() == skill) & (single_peaked == passes)
-        axis     = ax[row,col]
-        opacity  = float(np.clip(3 / np.sqrt(max(selected.sum(),1)),0.08,0.85))
-
-        axis.plot(preference_tariffs,utility_profiles[selected].T,color=color,linewidth=0.6,alpha=opacity,rasterized=True)
-        axis.axhline(0,color='black',linestyle=':',linewidth=1)
-        axis.set_title(f'{title}: {label} ({selected.sum():,} states)',fontsize=12)
-        axis.xaxis.set_major_formatter(mtick.PercentFormatter(xmax=1))
-        axis.yaxis.set_major_formatter(mtick.PercentFormatter(xmax=1))
-        axis.tick_params(labelsize=11)
-        axis.set_axisbelow(True)
-        axis.grid(linestyle='--',alpha=0.3)
-
-        if not selected.any():
-            axis.text(0.5,0.5,'No states',transform=axis.transAxes,ha='center',va='center',fontsize=12)
-
-fig.supxlabel(r'Tariff rate ($\tau$)',fontsize=12)
-fig.supylabel('Utility gap relative to each state\'s absolute peak utility',fontsize=12)
-fig.savefig(OUTPUTS_QUANT_EX / 'sec_B_utility_profiles.pdf')
-plt.close(fig)
