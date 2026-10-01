@@ -53,7 +53,7 @@ CalibPar = TypeCalibParameters(
 
 p  : dict  = post_gmm['parameters']
 τ_0: float = p['τ']
-τ_1: float = 0.096  # Apply the same proportional shock to 1996
+τ_1: float = (0.096-0.024)+p['τ']  # Apply the same tariff shock to 1996
 
 T0_ModelPar: TypeModelParameters = TypeModelParameters(
     α            = p['α'],
