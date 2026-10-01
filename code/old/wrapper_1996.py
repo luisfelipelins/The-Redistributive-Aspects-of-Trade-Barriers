@@ -1,5 +1,5 @@
-run_ext_calib = True
-run_gmm       = True
+run_ext_calib = False
+run_gmm       = False
 run_exercises = True
 
 import subprocess

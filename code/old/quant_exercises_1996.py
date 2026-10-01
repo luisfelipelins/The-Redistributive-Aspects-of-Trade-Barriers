@@ -368,50 +368,6 @@ plt.tight_layout()
 plt.savefig(OUTPUTS_QUANT_EX / 'sec_A_income_distribution.pdf')
 plt.close()
 
-### --- Creating Supply and Demand Curves for Capital in both Models --- ###
-ub_diff = 1 / T0_model.ModelPar.δ - 1 - T0_model.r
-
-r_grid = np.linspace(T0_model.r - ub_diff,1 / T0_model.ModelPar.δ - 1 - 1e-4,100)
-
-df = dict()
-
-for r in r_grid:
-
-    T0_copy = GeneralEquilibriumModel(T0_ModelPar,CalibPar,log_dir=None,log_inner=False)
-    T1_copy = GeneralEquilibriumModel(T1_ModelPar,CalibPar,log_dir=None,log_inner=False)
-
-    T0_copy.inner_loop_solver(r=r)
-    T0_copy.solve_household_side(r=r)
-
-    K0_supply = (T0_copy.mod_res['dens'] * T0_copy.mod_res['a_0']).sum()
-    K0_demand = T0_copy.K_demand
-
-    T1_copy.inner_loop_solver(r=r)
-    T1_copy.solve_household_side(r=r)
-
-    K1_supply = (T1_copy.mod_res['dens'] * T1_copy.mod_res['a_0']).sum()
-    K1_demand = T1_copy.K_demand
-
-    df[r] = pd.Series({'M0_K_d': K0_demand,'M0_K_s': K0_supply,'M1_K_d': K1_demand,'M1_K_s': K1_supply})
-
-capital_curves            = pd.DataFrame.from_dict(df,orient='index')
-capital_curves.index.name = 'r'
-
-fig,ax = plt.subplots(figsize=(7,4))
-
-ax.plot(capital_curves.index,capital_curves['M0_K_d'],color='#fa003f',label=r'Pre-shock')
-ax.plot(capital_curves.index,capital_curves['M0_K_s'],color='#fa003f',label='_')
-ax.plot(capital_curves.index,capital_curves['M1_K_d'],color='#184f95',linestyle='--',label=r'Post-shock')
-ax.plot(capital_curves.index,capital_curves['M1_K_s'],color='#184f95',linestyle='--',label='_')
-ax.legend(loc=0)
-ax.grid(linestyle='--')
-ax.set_xlabel('Interest rate ($r$)')
-ax.set_ylabel('Capital')
-ax.xaxis.set_major_formatter(mtick.PercentFormatter(xmax=1,decimals=2))
-
-plt.tight_layout()
-plt.savefig(OUTPUTS_QUANT_EX / 'sec_A_K_demand_supply.pdf')
-plt.close()
 
 ### --- Disagg. Comparison - Table --- ###
 
